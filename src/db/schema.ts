@@ -86,6 +86,32 @@ export const races = pgTable('races', {
   lastSyncedAt: timestamp('last_synced_at', { withTimezone: true }),
 });
 
+// 4b. RACE ENTRIES TABLE (Tracks weekly starting field per race)
+export const raceEntries = pgTable(
+  'race_entries',
+  {
+    id: serial('id').primaryKey(),
+    raceId: text('race_id')
+      .notNull()
+      .references(() => races.id),
+    seriesId: integer('series_id')
+      .notNull()
+      .references(() => seriesConfig.id),
+    driverId: text('driver_id')
+      .notNull()
+      .references(() => drivers.id),
+    carNumber: text('car_number').notNull(),
+    startingPosition: integer('starting_position'),
+    isEntered: boolean('is_entered').notNull().default(true),
+  },
+  (table) => ({
+    raceEntryDriverUnique: uniqueIndex('idx_race_entry_driver').on(
+      table.raceId,
+      table.driverId
+    ),
+  })
+);
+
 // 5. SEASON ROSTERS TABLE (With Car Anchor Fallback)
 export const seasonRosters = pgTable(
   'season_rosters',

@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { eq, and, ne, isNull } from 'drizzle-orm';
+import { eq, and, ne, isNull, sql } from 'drizzle-orm';
 import { db } from './index.ts';
 import {
   users,
@@ -7,6 +7,7 @@ import {
   seriesConfig,
   drivers,
   races,
+  raceEntries,
   seasonRosters,
   weeklyPicks,
   raceDriverResults,
@@ -96,7 +97,7 @@ export async function ensureReferenceDataSeeded(): Promise<void> {
         .onConflictDoNothing();
 
       const canonicalDrivers: Array<typeof drivers.$inferInsert> = [
-        // Cup Series - Chase (Prev Playoff Drivers)
+        // Cup Series - 16 Chase (Previous Season Postseason Drivers)
         { id: 'c1', nascarDriverId: 4001, seriesId: 1, carNumber: '5', fullName: 'Kyle Larson', team: 'Hendrick Motorsports', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
         { id: 'c2', nascarDriverId: 4002, seriesId: 1, carNumber: '24', fullName: 'William Byron', team: 'Hendrick Motorsports', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
         { id: 'c3', nascarDriverId: 4003, seriesId: 1, carNumber: '12', fullName: 'Ryan Blaney', team: 'Team Penske', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
@@ -104,20 +105,39 @@ export async function ensureReferenceDataSeeded(): Promise<void> {
         { id: 'c5', nascarDriverId: 4005, seriesId: 1, carNumber: '11', fullName: 'Denny Hamlin', team: 'Joe Gibbs Racing', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
         { id: 'c6', nascarDriverId: 4006, seriesId: 1, carNumber: '9', fullName: 'Chase Elliott', team: 'Hendrick Motorsports', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
         { id: 'c7', nascarDriverId: 4007, seriesId: 1, carNumber: '45', fullName: 'Tyler Reddick', team: '23XI Racing', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
-        { id: 'c8', nascarDriverId: 4008, seriesId: 1, carNumber: '48', fullName: 'Alex Bowman', team: 'Hendrick Motorsports', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
         { id: 'c9', nascarDriverId: 4009, seriesId: 1, carNumber: '22', fullName: 'Joey Logano', team: 'Team Penske', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
+        { id: 'cn2', nascarDriverId: 4102, seriesId: 1, carNumber: '17', fullName: 'Chris Buescher', team: 'RFK Racing', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
+        { id: 'cn3', nascarDriverId: 4103, seriesId: 1, carNumber: '23', fullName: 'Bubba Wallace', team: '23XI Racing', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
+        { id: 'cn5', nascarDriverId: 4105, seriesId: 1, carNumber: '54', fullName: 'Ty Gibbs', team: 'Joe Gibbs Racing', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
+        { id: 'c10', nascarDriverId: 4010, seriesId: 1, carNumber: '19', fullName: 'Chase Briscoe', team: 'Joe Gibbs Racing', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
+        { id: 'c11', nascarDriverId: 4011, seriesId: 1, carNumber: '7', fullName: 'Daniel Suárez', team: 'Spire Motorsports', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
+        { id: 'c12', nascarDriverId: 4012, seriesId: 1, carNumber: '77', fullName: 'Carson Hocevar', team: 'Spire Motorsports', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
+        { id: 'c13', nascarDriverId: 4013, seriesId: 1, carNumber: '2', fullName: 'Austin Cindric', team: 'Team Penske', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
+        { id: 'c14', nascarDriverId: 4014, seriesId: 1, carNumber: '60', fullName: 'Ryan Preece', team: 'RFK Racing', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
 
-        // Cup Series - Non-Chase
+        // Cup Series - 20 Non-Chase Chartered Drivers
+        { id: 'c8', nascarDriverId: 4008, seriesId: 1, carNumber: '48', fullName: 'Alex Bowman', team: 'Hendrick Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
         { id: 'cn1', nascarDriverId: 4101, seriesId: 1, carNumber: '8', fullName: 'Kyle Busch', team: 'Richard Childress Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
-        { id: 'cn2', nascarDriverId: 4102, seriesId: 1, carNumber: '17', fullName: 'Chris Buescher', team: 'RFK Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
-        { id: 'cn3', nascarDriverId: 4103, seriesId: 1, carNumber: '23', fullName: 'Bubba Wallace', team: '23XI Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
         { id: 'cn4', nascarDriverId: 4104, seriesId: 1, carNumber: '1', fullName: 'Ross Chastain', team: 'Trackhouse Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
-        { id: 'cn5', nascarDriverId: 4105, seriesId: 1, carNumber: '54', fullName: 'Ty Gibbs', team: 'Joe Gibbs Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
         { id: 'cn6', nascarDriverId: 4106, seriesId: 1, carNumber: '71', fullName: 'Michael McDowell', team: 'Spire Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
         { id: 'cn7', nascarDriverId: 4107, seriesId: 1, carNumber: '6', fullName: 'Brad Keselowski', team: 'RFK Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
         { id: 'cn8', nascarDriverId: 4108, seriesId: 1, carNumber: '21', fullName: 'Josh Berry', team: 'Wood Brothers Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'cn9', nascarDriverId: 4109, seriesId: 1, carNumber: '3', fullName: 'Austin Dillon', team: 'Richard Childress Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'cn10', nascarDriverId: 4110, seriesId: 1, carNumber: '4', fullName: 'Noah Gragson', team: 'Front Row Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'cn11', nascarDriverId: 4111, seriesId: 1, carNumber: '10', fullName: 'Ty Dillon', team: 'Kaulig Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'cn12', nascarDriverId: 4112, seriesId: 1, carNumber: '16', fullName: 'AJ Allmendinger', team: 'Kaulig Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'cn13', nascarDriverId: 4113, seriesId: 1, carNumber: '34', fullName: 'Todd Gilliland', team: 'Front Row Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'cn14', nascarDriverId: 4114, seriesId: 1, carNumber: '35', fullName: 'Riley Herbst', team: '23XI Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'cn15', nascarDriverId: 4115, seriesId: 1, carNumber: '38', fullName: 'Zane Smith', team: 'Front Row Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'cn16', nascarDriverId: 4116, seriesId: 1, carNumber: '41', fullName: 'Cole Custer', team: 'Haas Factory Team', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'cn17', nascarDriverId: 4117, seriesId: 1, carNumber: '42', fullName: 'John Hunter Nemechek', team: 'Legacy Motor Club', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'cn18', nascarDriverId: 4118, seriesId: 1, carNumber: '43', fullName: 'Erik Jones', team: 'Legacy Motor Club', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'cn19', nascarDriverId: 4119, seriesId: 1, carNumber: '47', fullName: 'Ricky Stenhouse Jr.', team: 'Hyak Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'cn20', nascarDriverId: 4120, seriesId: 1, carNumber: '51', fullName: 'Cody Ware', team: 'Rick Ware Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'cn21', nascarDriverId: 4121, seriesId: 1, carNumber: '88', fullName: 'Connor Zilisch', team: 'Trackhouse Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'cn22', nascarDriverId: 4122, seriesId: 1, carNumber: '97', fullName: 'Shane van Gisbergen', team: 'Trackhouse Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
 
-        // O'Reilly's Series - Regulars & Buschwhackers
+        // O'Reilly's Series - 26 Regulars & 4 Buschwhackers
         { id: 'o1', nascarDriverId: 5001, seriesId: 2, carNumber: '88', fullName: 'Connor Zilisch', team: 'JR Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
         { id: 'o2', nascarDriverId: 5002, seriesId: 2, carNumber: '7', fullName: 'Justin Allgaier', team: 'JR Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
         { id: 'o3', nascarDriverId: 5003, seriesId: 2, carNumber: '21', fullName: 'Austin Hill', team: 'Richard Childress Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
@@ -126,10 +146,30 @@ export async function ensureReferenceDataSeeded(): Promise<void> {
         { id: 'o6', nascarDriverId: 5006, seriesId: 2, carNumber: '1', fullName: 'Carson Kvapil', team: 'JR Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
         { id: 'o7', nascarDriverId: 5007, seriesId: 2, carNumber: '8', fullName: 'Sammy Smith', team: 'JR Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
         { id: 'o8', nascarDriverId: 5008, seriesId: 2, carNumber: '41', fullName: 'Sam Mayer', team: 'Haas Factory Team', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o9', nascarDriverId: 5009, seriesId: 2, carNumber: '17', fullName: 'Corey Day', team: 'Hendrick Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o10', nascarDriverId: 5010, seriesId: 2, carNumber: '19', fullName: 'Brent Crews', team: 'Joe Gibbs Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o11', nascarDriverId: 5011, seriesId: 2, carNumber: '20', fullName: 'Brandon Jones', team: 'Joe Gibbs Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o12', nascarDriverId: 5012, seriesId: 2, carNumber: '10', fullName: 'Daniel Dye', team: 'Kaulig Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o13', nascarDriverId: 5013, seriesId: 2, carNumber: '11', fullName: 'Josh Williams', team: 'Kaulig Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o14', nascarDriverId: 5014, seriesId: 2, carNumber: '16', fullName: 'Christian Eckes', team: 'Kaulig Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o15', nascarDriverId: 5015, seriesId: 2, carNumber: '24', fullName: 'Harrison Burton', team: 'Sam Hunt Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o16', nascarDriverId: 5016, seriesId: 2, carNumber: '26', fullName: 'Dean Thompson', team: 'Sam Hunt Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o17', nascarDriverId: 5017, seriesId: 2, carNumber: '27', fullName: 'Jeb Burton', team: 'Jordan Anderson Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o18', nascarDriverId: 5018, seriesId: 2, carNumber: '31', fullName: 'Blaine Perkins', team: 'Jordan Anderson Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o19', nascarDriverId: 5019, seriesId: 2, carNumber: '39', fullName: 'Ryan Sieg', team: 'RSS Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o20', nascarDriverId: 5020, seriesId: 2, carNumber: '28', fullName: 'Kyle Sieg', team: 'RSS Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o21', nascarDriverId: 5021, seriesId: 2, carNumber: '45', fullName: 'Lavar Scott', team: 'Alpha Prime Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o22', nascarDriverId: 5022, seriesId: 2, carNumber: '99', fullName: 'Parker Retzlaff', team: 'Viking Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o23', nascarDriverId: 5023, seriesId: 2, carNumber: '48', fullName: 'Nick Sanchez', team: 'Big Machine Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o24', nascarDriverId: 5024, seriesId: 2, carNumber: '54', fullName: 'Taylor Gray', team: 'Joe Gibbs Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o25', nascarDriverId: 5025, seriesId: 2, carNumber: '18', fullName: 'William Sawalich', team: 'Joe Gibbs Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o26', nascarDriverId: 5026, seriesId: 2, carNumber: '42', fullName: 'Anthony Alfredo', team: "Young's Motorsports", madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
         { id: 'o_bw1', nascarDriverId: 4001, seriesId: 2, carNumber: '17', fullName: 'Kyle Larson', team: 'Hendrick Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: true, active: true },
         { id: 'o_bw2', nascarDriverId: 4006, seriesId: 2, carNumber: '9', fullName: 'Chase Elliott', team: 'JR Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: true, active: true },
+        { id: 'o_bw3', nascarDriverId: 4101, seriesId: 2, carNumber: '33', fullName: 'Kyle Busch', team: 'Richard Childress Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: true, active: true },
+        { id: 'o_bw4', nascarDriverId: 4004, seriesId: 2, carNumber: '19', fullName: 'Christopher Bell', team: 'Joe Gibbs Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: true, active: true },
 
-        // Truck Series - Regulars & Buschwhacker
+        // Craftsman Truck Series - 24 Regulars & 3 Buschwhackers
         { id: 't1', nascarDriverId: 6001, seriesId: 3, carNumber: '11', fullName: 'Corey Heim', team: 'TRICON Garage', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
         { id: 't2', nascarDriverId: 6002, seriesId: 3, carNumber: '34', fullName: 'Layne Riggs', team: 'Front Row Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
         { id: 't3', nascarDriverId: 6003, seriesId: 3, carNumber: '98', fullName: 'Ty Majeski', team: 'ThorSport Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
@@ -138,10 +178,42 @@ export async function ensureReferenceDataSeeded(): Promise<void> {
         { id: 't6', nascarDriverId: 6006, seriesId: 3, carNumber: '71', fullName: 'Rajah Caruth', team: 'Spire Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
         { id: 't7', nascarDriverId: 6007, seriesId: 3, carNumber: '38', fullName: 'Chandler Smith', team: 'Front Row Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
         { id: 't8', nascarDriverId: 6008, seriesId: 3, carNumber: '52', fullName: 'Stewart Friesen', team: 'Halmar Friesen Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't9', nascarDriverId: 6009, seriesId: 3, carNumber: '11', fullName: 'Kaden Honeycutt', team: 'TRICON Garage', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't10', nascarDriverId: 6010, seriesId: 3, carNumber: '15', fullName: 'Tanner Gray', team: 'TRICON Garage', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't11', nascarDriverId: 6011, seriesId: 3, carNumber: '17', fullName: 'Gio Ruggiero', team: 'TRICON Garage', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't12', nascarDriverId: 6012, seriesId: 3, carNumber: '18', fullName: 'Tyler Ankrum', team: 'McAnally-Hilgemann Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't13', nascarDriverId: 6013, seriesId: 3, carNumber: '19', fullName: 'Daniel Hemric', team: 'McAnally-Hilgemann Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't14', nascarDriverId: 6014, seriesId: 3, carNumber: '99', fullName: 'Ben Rhodes', team: 'ThorSport Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't15', nascarDriverId: 6015, seriesId: 3, carNumber: '13', fullName: 'Jake Garcia', team: 'ThorSport Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't16', nascarDriverId: 6016, seriesId: 3, carNumber: '88', fullName: 'Matt Crafton', team: 'ThorSport Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't17', nascarDriverId: 6017, seriesId: 3, carNumber: '12', fullName: 'Brenden Queen', team: 'Kaulig Racing (Ram)', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't18', nascarDriverId: 6018, seriesId: 3, carNumber: '16', fullName: 'Justin Haley', team: 'Kaulig Racing (Ram)', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't19', nascarDriverId: 6019, seriesId: 3, carNumber: '14', fullName: 'Mini Tyrrell', team: 'Kaulig Racing (Ram)', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't20', nascarDriverId: 6020, seriesId: 3, carNumber: '10', fullName: 'Corey LaJoie', team: 'Kaulig Racing (Ram)', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't21', nascarDriverId: 6021, seriesId: 3, carNumber: '77', fullName: 'Andrés Pérez de Lara', team: 'Spire Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't22', nascarDriverId: 6022, seriesId: 3, carNumber: '26', fullName: 'Dawson Sutton', team: 'Rackley W.A.R.', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't23', nascarDriverId: 6023, seriesId: 3, carNumber: '41', fullName: 'Bayley Currey', team: 'Niece Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't24', nascarDriverId: 6024, seriesId: 3, carNumber: '76', fullName: 'Spencer Boyd', team: 'Freedom Racing Enterprises', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
         { id: 't_bw1', nascarDriverId: 4101, seriesId: 3, carNumber: '7', fullName: 'Kyle Busch', team: 'Spire Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: true, active: true },
+        { id: 't_bw2', nascarDriverId: 4001, seriesId: 3, carNumber: '07', fullName: 'Kyle Larson', team: 'Spire Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: true, active: true },
+        { id: 't_bw3', nascarDriverId: 4104, seriesId: 3, carNumber: '45', fullName: 'Ross Chastain', team: 'Niece Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: true, active: true },
       ];
 
-      await db.insert(drivers).values(canonicalDrivers).onConflictDoNothing();
+      await db
+        .insert(drivers)
+        .values(canonicalDrivers)
+        .onConflictDoUpdate({
+          target: drivers.id,
+          set: {
+            carNumber: sql`excluded.car_number`,
+            fullName: sql`excluded.full_name`,
+            team: sql`excluded.team`,
+            madeLastYearChase: sql`excluded.made_last_year_chase`,
+            inCurrentChase: sql`excluded.in_current_chase`,
+            isBuschwhacker: sql`excluded.is_buschwhacker`,
+            active: sql`excluded.active`,
+          },
+        });
 
       await db
         .insert(races)
@@ -187,6 +259,31 @@ export async function ensureReferenceDataSeeded(): Promise<void> {
           },
         ])
         .onConflictDoNothing();
+
+      // Seed default weekly race entries so Driver Bank & Weekly Starter show active entries for this week
+      const nonEnteredWeekendIds = new Set(['o_bw3', 'o_bw4', 't_bw2', 't_bw3']);
+      const raceIdBySeries: Record<number, string> = {
+        1: 'r_cup_bristol',
+        2: 'r_oreillys_bristol',
+        3: 'r_trucks_bristol',
+      };
+      const gridCounter: Record<number, number> = { 1: 0, 2: 0, 3: 0 };
+      const initialEntries: Array<typeof raceEntries.$inferInsert> = [];
+      for (const drv of canonicalDrivers) {
+        if (nonEnteredWeekendIds.has(drv.id)) continue;
+        gridCounter[drv.seriesId] = (gridCounter[drv.seriesId] || 0) + 1;
+        initialEntries.push({
+          raceId: raceIdBySeries[drv.seriesId],
+          seriesId: drv.seriesId,
+          driverId: drv.id,
+          carNumber: drv.carNumber,
+          startingPosition: gridCounter[drv.seriesId],
+          isEntered: true,
+        });
+      }
+      if (initialEntries.length > 0) {
+        await db.insert(raceEntries).values(initialEntries).onConflictDoNothing();
+      }
 
       referenceSeeded = true;
     } catch (error) {
@@ -655,6 +752,7 @@ export async function getFullLeagueState(viewer?: {
       allSeries,
       allDrivers,
       allRaces,
+      allEntries,
       allRosters,
       allPicks,
       allResults,
@@ -664,6 +762,7 @@ export async function getFullLeagueState(viewer?: {
       db.select().from(seriesConfig),
       db.select().from(drivers),
       db.select().from(races),
+      db.select().from(raceEntries),
       db.select().from(seasonRosters),
       db.select().from(weeklyPicks),
       db.select().from(raceDriverResults),
@@ -704,6 +803,7 @@ export async function getFullLeagueState(viewer?: {
       seriesConfig: allSeries,
       drivers: allDrivers,
       races: allRaces,
+      raceEntries: allEntries,
       seasonRosters: allRosters,
       weeklyPicks: maskedPicks,
       raceDriverResults: currentResults,
@@ -732,6 +832,20 @@ export async function saveWeeklyPick(params: {
 
     if (targetRace.length > 0 && targetRace[0].isLockedRevealed) {
       throw new Error('Race has already reached Green Flag lock.');
+    }
+
+    const entriesForRace = await db
+      .select()
+      .from(raceEntries)
+      .where(
+        and(eq(raceEntries.raceId, raceId), eq(raceEntries.isEntered, true))
+      );
+
+    if (
+      entriesForRace.length > 0 &&
+      !entriesForRace.some((e) => e.driverId === driverId)
+    ) {
+      throw new Error("That driver is not entered in this week's race.");
     }
 
     const seriesRow = await db
@@ -792,9 +906,73 @@ export async function updateSeasonRosterSlot(params: {
   slotType: string;
   driverId: string;
   fallbackCarNumber: string;
+  allowOverwrite?: boolean;
 }) {
   try {
-    const { userId, seriesId, slotType, driverId, fallbackCarNumber } = params;
+    const {
+      userId,
+      seriesId,
+      slotType,
+      driverId,
+      fallbackCarNumber,
+      allowOverwrite = false,
+    } = params;
+
+    const existingSlot = await db
+      .select()
+      .from(seasonRosters)
+      .where(
+        and(
+          eq(seasonRosters.userId, userId),
+          eq(seasonRosters.slotType, slotType)
+        )
+      );
+
+    if (existingSlot.length > 0 && !allowOverwrite) {
+      throw new Error(
+        'Season roster picks are locked once drafted. Ask your League Commissioner to make any changes.'
+      );
+    }
+
+    if (slotType === 'cup_current_chase' && !allowOverwrite) {
+      const cupCfg = await db
+        .select()
+        .from(seriesConfig)
+        .where(eq(seriesConfig.id, 1));
+      if (!cupCfg[0]?.chaseActive) {
+        throw new Error(
+          'The 5th Mid-Season Cup Chase slot is currently locked by the Commissioner.'
+        );
+      }
+    }
+
+    const drvRows = await db
+      .select()
+      .from(drivers)
+      .where(eq(drivers.id, driverId));
+    if (drvRows.length === 0) {
+      throw new Error('Driver not found.');
+    }
+    const drv = drvRows[0];
+
+    if (!allowOverwrite) {
+      if (drv.seriesId !== seriesId || drv.isBuschwhacker) {
+        throw new Error('Selected driver is not eligible for this season slot.');
+      }
+      if (slotType === 'cup_prev_chase' && !drv.madeLastYearChase) {
+        throw new Error(
+          'Only the 16 drivers from last season’s Cup Chase are eligible for this slot.'
+        );
+      }
+      if (slotType === 'cup_prev_non_chase' && drv.madeLastYearChase) {
+        throw new Error(
+          'Only Cup Non-Chase drivers are eligible for this slot.'
+        );
+      }
+      if (slotType === 'cup_current_chase' && !drv.inCurrentChase) {
+        throw new Error('Selected driver is not in the Cup Chase field.');
+      }
+    }
 
     // Enforce exclusive season driver rule across the league EXCEPT 'cup_current_chase'
     if (slotType !== 'cup_current_chase') {
@@ -1212,4 +1390,201 @@ export async function resetExclusiveDraft(adminUserId: string) {
       { cause: error }
     );
   }
+}
+
+/**
+ * Syncs discovered drivers & weekly race starters from live NASCAR feeds into `drivers` and `race_entries`.
+ */
+export async function upsertRaceEntriesFromFeed(
+  raceId: string,
+  seriesId: number,
+  entries: Array<{
+    nascarDriverId: number;
+    fullName: string;
+    carNumber: string;
+    team: string;
+    startingPosition?: number | null;
+    isBuschwhacker?: boolean;
+  }>
+) {
+  await ensureReferenceDataSeeded();
+  const raceRows = await db.select().from(races).where(eq(races.id, raceId));
+  if (raceRows.length === 0 || entries.length === 0) return;
+
+  for (const e of entries) {
+    if (!Number.isFinite(e.nascarDriverId) || e.nascarDriverId <= 0) continue;
+
+    let existingDrv = await db
+      .select()
+      .from(drivers)
+      .where(
+        and(
+          eq(drivers.nascarDriverId, e.nascarDriverId),
+          eq(drivers.seriesId, seriesId)
+        )
+      );
+
+    let driverId = existingDrv[0]?.id;
+    if (!driverId) {
+      driverId = `d_${seriesId}_${e.nascarDriverId}`;
+      await db
+        .insert(drivers)
+        .values({
+          id: driverId,
+          nascarDriverId: e.nascarDriverId,
+          seriesId,
+          carNumber: e.carNumber || '00',
+          fullName: e.fullName || `Driver #${e.carNumber || '00'}`,
+          team: e.team || 'Independent',
+          madeLastYearChase: false,
+          inCurrentChase: false,
+          isBuschwhacker: Boolean(e.isBuschwhacker),
+          active: true,
+        })
+        .onConflictDoNothing();
+    }
+
+    await db
+      .insert(raceEntries)
+      .values({
+        raceId,
+        seriesId,
+        driverId,
+        carNumber: e.carNumber || existingDrv[0]?.carNumber || '00',
+        startingPosition: e.startingPosition ?? null,
+        isEntered: true,
+      })
+      .onConflictDoUpdate({
+        target: [raceEntries.raceId, raceEntries.driverId],
+        set: {
+          carNumber: e.carNumber || existingDrv[0]?.carNumber || '00',
+          startingPosition: e.startingPosition ?? null,
+          isEntered: true,
+        },
+      });
+  }
+}
+
+/**
+ * Allows the Commissioner to add a new/2027 driver and optionally enter them into the active race.
+ */
+export async function adminAddDriver(params: {
+  adminUserId: string;
+  seriesId: number;
+  carNumber: string;
+  fullName: string;
+  team: string;
+  madeLastYearChase?: boolean;
+  inCurrentChase?: boolean;
+  isBuschwhacker?: boolean;
+  enterActiveRace?: boolean;
+}) {
+  await ensureReferenceDataSeeded();
+  await verifyAdminUser(params.adminUserId);
+
+  const cleanName = params.fullName.trim();
+  const cleanCar = params.carNumber.replace('#', '').trim();
+  const cleanTeam = params.team.trim() || 'Independent';
+  if (cleanName.length < 2 || !cleanCar) {
+    throw new Error('Driver name and car number are required.');
+  }
+
+  const allSeriesDrvs = await db
+    .select()
+    .from(drivers)
+    .where(eq(drivers.seriesId, params.seriesId));
+  const maxNascarId = allSeriesDrvs.reduce(
+    (max, d) => Math.max(max, d.nascarDriverId),
+    params.seriesId * 1000 + 6000
+  );
+  const newNascarId = maxNascarId + 1;
+  const newId = `drv_${params.seriesId}_${crypto.randomBytes(4).toString('hex')}`;
+
+  const [created] = await db
+    .insert(drivers)
+    .values({
+      id: newId,
+      nascarDriverId: newNascarId,
+      seriesId: params.seriesId,
+      carNumber: cleanCar,
+      fullName: cleanName,
+      team: cleanTeam,
+      madeLastYearChase: Boolean(params.madeLastYearChase),
+      inCurrentChase: Boolean(
+        params.inCurrentChase ?? params.madeLastYearChase
+      ),
+      isBuschwhacker: Boolean(params.isBuschwhacker),
+      active: true,
+    })
+    .returning();
+
+  if (params.enterActiveRace !== false) {
+    const raceMap: Record<number, string> = {
+      1: 'r_cup_bristol',
+      2: 'r_oreillys_bristol',
+      3: 'r_trucks_bristol',
+    };
+    const raceId = raceMap[params.seriesId];
+    if (raceId) {
+      await db
+        .insert(raceEntries)
+        .values({
+          raceId,
+          seriesId: params.seriesId,
+          driverId: created.id,
+          carNumber: created.carNumber,
+          startingPosition: null,
+          isEntered: true,
+        })
+        .onConflictDoNothing();
+    }
+  }
+
+  return created;
+}
+
+/**
+ * Allows the Commissioner to toggle whether a driver is entered/starting in a given race.
+ */
+export async function adminToggleRaceEntry(params: {
+  adminUserId: string;
+  raceId: string;
+  seriesId: number;
+  driverId: string;
+  isEntered: boolean;
+  startingPosition?: number | null;
+}) {
+  await ensureReferenceDataSeeded();
+  await verifyAdminUser(params.adminUserId);
+
+  const drvRows = await db
+    .select()
+    .from(drivers)
+    .where(eq(drivers.id, params.driverId));
+  if (drvRows.length === 0) {
+    throw new Error('Driver not found.');
+  }
+
+  const [row] = await db
+    .insert(raceEntries)
+    .values({
+      raceId: params.raceId,
+      seriesId: params.seriesId,
+      driverId: params.driverId,
+      carNumber: drvRows[0].carNumber,
+      startingPosition: params.startingPosition ?? null,
+      isEntered: params.isEntered,
+    })
+    .onConflictDoUpdate({
+      target: [raceEntries.raceId, raceEntries.driverId],
+      set: {
+        isEntered: params.isEntered,
+        ...(params.startingPosition !== undefined
+          ? { startingPosition: params.startingPosition }
+          : {}),
+      },
+    })
+    .returning();
+
+  return row;
 }

@@ -19,6 +19,9 @@ import {
   adminOverrideWeeklyPick,
   adminUpdateSeasonSlot,
   resetExclusiveDraft,
+  upsertRaceEntriesFromFeed,
+  adminAddDriver,
+  adminToggleRaceEntry,
 } from './src/db/repository.ts';
 import {
   parseCookies,
@@ -279,6 +282,7 @@ async function startServer() {
           slotType: String(slotType),
           driverId: String(driverId),
           fallbackCarNumber: String(fallbackCarNumber),
+          allowOverwrite: req.sessionUser!.role === 'admin',
         });
         const state = await getFullLeagueState(req.sessionUser!);
         res.json({ ok: true, state });
@@ -367,6 +371,31 @@ async function startServer() {
             fallbackCarNumber: String(body.fallbackCarNumber || ''),
             forceReassign: Boolean(body.forceReassign),
           });
+        } else if (action === 'add_driver') {
+          await adminAddDriver({
+            adminUserId,
+            seriesId: Number(body.seriesId),
+            carNumber: String(body.carNumber || ''),
+            fullName: String(body.fullName || ''),
+            team: String(body.team || ''),
+            madeLastYearChase: Boolean(body.madeLastYearChase),
+            inCurrentChase: Boolean(body.inCurrentChase),
+            isBuschwhacker: Boolean(body.isBuschwhacker),
+            enterActiveRace: body.enterActiveRace !== false,
+          });
+        } else if (action === 'toggle_race_entry') {
+          await adminToggleRaceEntry({
+            adminUserId,
+            raceId: String(body.raceId || ''),
+            seriesId: Number(body.seriesId),
+            driverId: String(body.driverId || ''),
+            isEntered: Boolean(body.isEntered),
+            startingPosition:
+              body.startingPosition !== undefined &&
+              body.startingPosition !== null
+                ? Number(body.startingPosition)
+                : null,
+          });
         } else {
           return res
             .status(400)
@@ -418,6 +447,7 @@ async function startServer() {
             slotType: String(body.slotType || ''),
             driverId: String(body.driverId || ''),
             fallbackCarNumber: String(body.fallbackCarNumber || ''),
+            allowOverwrite: sessionUser.role === 'admin',
           });
         } else {
           return res
@@ -529,6 +559,37 @@ async function startServer() {
               finishing_status: r.finishing_status,
               fastest_lap: Boolean(r.fastest_lap),
             }));
+
+            const raceIdMap: Record<number, string> = {
+              1: 'r_cup_bristol',
+              2: 'r_oreillys_bristol',
+              3: 'r_trucks_bristol',
+            };
+            const targetLocalRaceId = raceIdMap[Number(targetSeriesId)];
+            const lineupRun = Array.isArray(weekendData?.weekend_runs)
+              ? weekendData.weekend_runs.find(
+                  (run: any) =>
+                    Array.isArray(run?.results) && run.results.length > 0
+                )
+              : null;
+            const entrySource =
+              resultsArray.length > 0 ? resultsArray : lineupRun?.results || [];
+
+            if (targetLocalRaceId && entrySource.length > 0) {
+              await upsertRaceEntriesFromFeed(
+                targetLocalRaceId,
+                Number(targetSeriesId),
+                entrySource.map((r: any, idx: number) => ({
+                  nascarDriverId: Number(r.driver_id),
+                  fullName:
+                    r.driver_fullname ||
+                    `${r.first_name || ''} ${r.last_name || ''}`.trim(),
+                  carNumber: String(r.car_number || r.vehicle_number || '00'),
+                  team: r.team_name || 'Independent',
+                  startingPosition: Number(r.starting_position) || idx + 1,
+                }))
+              );
+            }
           } else if (liveRes.status === 'fulfilled' && liveRes.value.ok) {
             const liveData: any = await liveRes.value.json();
             const pointsArray = Array.isArray(liveData)
@@ -547,6 +608,28 @@ async function startServer() {
               points_earned: Number(r.points_earned || 0),
               finishing_status: r.status,
             }));
+
+            const raceIdMap: Record<number, string> = {
+              1: 'r_cup_bristol',
+              2: 'r_oreillys_bristol',
+              3: 'r_trucks_bristol',
+            };
+            const targetLocalRaceId = raceIdMap[Number(targetSeriesId)];
+            if (targetLocalRaceId && pointsArray.length > 0) {
+              await upsertRaceEntriesFromFeed(
+                targetLocalRaceId,
+                Number(targetSeriesId),
+                pointsArray.map((r: any, idx: number) => ({
+                  nascarDriverId: Number(r.driver_id),
+                  fullName:
+                    r.driver_fullname ||
+                    `${r.first_name || ''} ${r.last_name || ''}`.trim(),
+                  carNumber: String(r.car_number || r.vehicle_number || '00'),
+                  team: r.team_name || 'Independent',
+                  startingPosition: Number(r.starting_position) || idx + 1,
+                }))
+              );
+            }
           }
 
           if (rawResults.length > 0) {

@@ -170,6 +170,16 @@ interface DbRaceResult {
   isDisqualified: boolean;
 }
 
+interface DbRaceEntry {
+  id: number;
+  raceId: string;
+  seriesId: number;
+  driverId: string;
+  carNumber: string;
+  startingPosition: number | null;
+  isEntered: boolean;
+}
+
 interface LeagueStatePayload {
   leagueSettings?: {
     leagueName: string;
@@ -179,6 +189,7 @@ interface LeagueStatePayload {
   seriesConfig: DbSeriesConfig[];
   drivers: DbDriver[];
   races: DbRace[];
+  raceEntries?: DbRaceEntry[];
   seasonRosters: DbSeasonRoster[];
   weeklyPicks: DbWeeklyPick[];
   raceDriverResults: DbRaceResult[];
@@ -260,6 +271,10 @@ export default function App() {
 
   // Filters & Draft Room State
   const [bankSeriesFilter, setBankSeriesFilter] = useState<SeriesId>(1);
+  const [bankOnlyStarters, setBankOnlyStarters] = useState<boolean>(true);
+  const [bankSearch, setBankSearch] = useState<string>('');
+  const [weeklyDrawerSearch, setWeeklyDrawerSearch] = useState<string>('');
+  const [draftDriverSearch, setDraftDriverSearch] = useState<string>('');
   const [standingsViewFilter, setStandingsViewFilter] = useState<
     'all' | 'weekly_only' | 'season_only'
   >('all');
@@ -271,6 +286,16 @@ export default function App() {
   const [selectedDraftSlotType, setSelectedDraftSlotType] = useState<
     'cup_prev_chase' | 'cup_prev_non_chase' | 'oreillys_season' | 'trucks_season'
   >('cup_prev_chase');
+
+  // Commissioner Driver & Weekly Entry List Control State
+  const [newDrvSeries, setNewDrvSeries] = useState<SeriesId>(1);
+  const [newDrvNumber, setNewDrvNumber] = useState<string>('');
+  const [newDrvName, setNewDrvName] = useState<string>('');
+  const [newDrvTeam, setNewDrvTeam] = useState<string>('');
+  const [newDrvChase, setNewDrvChase] = useState<boolean>(false);
+  const [newDrvBuschwhacker, setNewDrvBuschwhacker] = useState<boolean>(false);
+  const [adminEntrySeries, setAdminEntrySeries] = useState<SeriesId>(1);
+  const [adminEntrySearch, setAdminEntrySearch] = useState<string>('');
 
   // Commissioner Team Control State
   const [adminTargetUserId, setAdminTargetUserId] = useState<string>('');
@@ -579,6 +604,18 @@ export default function App() {
     grouped[3].sort((a, b) => a.finish_position - b.finish_position);
     return grouped;
   }, [leagueState]);
+
+  const getEnteredDriversForSeries = (seriesId: SeriesId) => {
+    const raceId = weekendRacesBySeries[seriesId]?.id;
+    const map = new Map<string, DbRaceEntry>();
+    if (!raceId) return map;
+    for (const entry of leagueState?.raceEntries || []) {
+      if (entry.raceId === raceId && entry.isEntered) {
+        map.set(entry.driverId, entry);
+      }
+    }
+    return map;
+  };
 
   const getDriverRemainingUses = (driverId: string, seriesId: SeriesId) => {
     const dbHistorical = (leagueState?.weeklyPicks || [])
@@ -2090,20 +2127,74 @@ export default function App() {
                             </div>
                           </div>
 
-                          <button
-                            onClick={() =>
-                              setSwapSeasonDrawerSlot({
-                                slotType: row.slotType,
-                                label: `${row.code} (${row.sub})`,
-                                seriesId: row.seriesId,
-                                exclusive: row.exclusive,
-                              })
-                            }
-                            className="min-h-[38px] px-2.5 py-1.5 rounded-lg text-xs font-bold bg-[#22283B] hover:bg-[#2C344D] text-slate-200 border border-slate-700 flex items-center gap-1 cursor-pointer"
-                          >
-                            <ArrowLeftRight className="w-3 h-3 text-[#FFD100]" />
-                            <span>EDIT</span>
-                          </button>
+                          {row.data.slotRow ? (
+                            isCurrentUserAdmin ? (
+                              <button
+                                onClick={() =>
+                                  setSwapSeasonDrawerSlot({
+                                    slotType: row.slotType,
+                                    label: `${row.code} (${row.sub})`,
+                                    seriesId: row.seriesId,
+                                    exclusive: row.exclusive,
+                                  })
+                                }
+                                className="min-h-[38px] px-2.5 py-1.5 rounded-lg text-xs font-bold bg-[#22283B] hover:bg-[#2C344D] text-slate-200 border border-slate-700 flex items-center gap-1 cursor-pointer"
+                              >
+                                <ArrowLeftRight className="w-3 h-3 text-[#FFD100]" />
+                                <span>EDIT</span>
+                              </button>
+                            ) : (
+                              <span
+                                title="Permanent season pick locked — ask Commissioner to adjust"
+                                className="min-h-[38px] px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-800/70 text-slate-400 border border-slate-800 flex items-center gap-1"
+                              >
+                                <Lock className="w-3 h-3" />
+                                <span>LOCKED</span>
+                              </span>
+                            )
+                          ) : row.slotType === 'cup_current_chase' ? (
+                            midSeasonChaseActive ? (
+                              <button
+                                onClick={() =>
+                                  setSwapSeasonDrawerSlot({
+                                    slotType: row.slotType,
+                                    label: `${row.code} (${row.sub})`,
+                                    seriesId: row.seriesId,
+                                    exclusive: row.exclusive,
+                                  })
+                                }
+                                className="min-h-[38px] px-2.5 py-1.5 rounded-lg text-xs font-bold bg-[#FFD100] hover:bg-[#ffe033] text-black flex items-center gap-1 cursor-pointer"
+                              >
+                                <span>PICK</span>
+                              </button>
+                            ) : (
+                              <span className="min-h-[38px] px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-800/70 text-slate-400 border border-slate-800 flex items-center gap-1">
+                                <Lock className="w-3 h-3" />
+                                <span>LOCKED</span>
+                              </span>
+                            )
+                          ) : isCurrentUserAdmin ? (
+                            <button
+                              onClick={() =>
+                                setSwapSeasonDrawerSlot({
+                                  slotType: row.slotType,
+                                  label: `${row.code} (${row.sub})`,
+                                  seriesId: row.seriesId,
+                                  exclusive: row.exclusive,
+                                })
+                              }
+                              className="min-h-[38px] px-2.5 py-1.5 rounded-lg text-xs font-bold bg-[#FFD100] hover:bg-[#ffe033] text-black flex items-center gap-1 cursor-pointer"
+                            >
+                              <span>DRAFT</span>
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => setActiveTab('draft')}
+                              className="min-h-[38px] px-2.5 py-1.5 rounded-lg text-xs font-bold bg-[#1D63FF] hover:bg-[#1552db] text-white flex items-center gap-1 cursor-pointer"
+                            >
+                              <span>GO TO DRAFT</span>
+                            </button>
+                          )}
                         </div>
                       </div>
                     );
@@ -2337,41 +2428,104 @@ export default function App() {
           {/* ==========================================
               TAB 3: COMPACT SLEEPER-STYLE DRIVER USAGE BANK
           ========================================== */}
-          {activeTab === 'bank' && (
-            <div className="space-y-3.5">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-                <div>
-                  <h1 className="font-display text-2xl font-bold tracking-wide text-white">
-                    Driver Usage Bank (5 Max Uses / Season)
-                  </h1>
-                  <p className="text-xs text-slate-400">
-                    Track remaining starts for {activeUserRow?.name} and tap{' '}
-                    <span className="text-[#FFD100] font-semibold">START</span>{' '}
-                    to slot an eligible driver into this week&apos;s lineup.
-                  </p>
+          {activeTab === 'bank' && (() => {
+            const seriesDrivers = (leagueState?.drivers || []).filter(
+              (d) => d.seriesId === bankSeriesFilter
+            );
+            const enteredMap = getEnteredDriversForSeries(bankSeriesFilter);
+            const startersCount = seriesDrivers.filter((d) =>
+              enteredMap.has(d.id)
+            ).length;
+            const searchQuery = bankSearch.trim().toLowerCase();
+
+            const filteredDrivers = seriesDrivers
+              .filter((d) => {
+                if (bankOnlyStarters && enteredMap.size > 0 && !enteredMap.has(d.id)) {
+                  return false;
+                }
+                if (searchQuery) {
+                  return (
+                    d.fullName.toLowerCase().includes(searchQuery) ||
+                    d.carNumber.toLowerCase().includes(searchQuery) ||
+                    d.team.toLowerCase().includes(searchQuery)
+                  );
+                }
+                return true;
+              })
+              .sort((a, b) => {
+                const posA = enteredMap.get(a.id)?.startingPosition ?? 999;
+                const posB = enteredMap.get(b.id)?.startingPosition ?? 999;
+                if (posA !== posB) return posA - posB;
+                return a.fullName.localeCompare(b.fullName);
+              });
+
+            return (
+              <div className="space-y-3.5">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                  <div>
+                    <h1 className="font-display text-2xl font-bold tracking-wide text-white">
+                      Driver Usage Bank (5 Max Uses / Season)
+                    </h1>
+                    <p className="text-xs text-slate-400">
+                      Track remaining starts for {activeUserRow?.name} and tap{' '}
+                      <span className="text-[#FFD100] font-semibold">START</span>{' '}
+                      to slot an eligible starter into this week&apos;s lineup.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-1 p-1 bg-[#131722] rounded-xl border border-slate-800 self-start">
+                    {([1, 2, 3] as SeriesId[]).map((sId) => (
+                      <button
+                        key={sId}
+                        onClick={() => setBankSeriesFilter(sId)}
+                        className={`min-h-[34px] px-3 py-1 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                          bankSeriesFilter === sId
+                            ? SERIES_META[sId].pylonBg
+                            : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        {SERIES_META[sId].shortName}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
-                <div className="flex items-center gap-1 p-1 bg-[#131722] rounded-xl border border-slate-800 self-start">
-                  {([1, 2, 3] as SeriesId[]).map((sId) => (
+                {/* Starting Field vs Full Roster Filter + Search */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 p-1 bg-[#131722] rounded-xl border border-slate-800 self-start">
                     <button
-                      key={sId}
-                      onClick={() => setBankSeriesFilter(sId)}
-                      className={`min-h-[34px] px-3 py-1 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
-                        bankSeriesFilter === sId
-                          ? SERIES_META[sId].pylonBg
+                      onClick={() => setBankOnlyStarters(true)}
+                      className={`min-h-[32px] px-3 py-1 rounded-lg text-xs font-bold cursor-pointer ${
+                        bankOnlyStarters
+                          ? 'bg-emerald-500 text-black'
                           : 'text-slate-400 hover:text-white'
                       }`}
                     >
-                      {SERIES_META[sId].shortName}
+                      Starting This Week ({startersCount})
                     </button>
-                  ))}
-                </div>
-              </div>
+                    <button
+                      onClick={() => setBankOnlyStarters(false)}
+                      className={`min-h-[32px] px-3 py-1 rounded-lg text-xs font-bold cursor-pointer ${
+                        !bankOnlyStarters
+                          ? 'bg-[#FFD100] text-black'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      All Drivers ({seriesDrivers.length})
+                    </button>
+                  </div>
 
-              <div className="bg-[#131722] border border-slate-800/90 rounded-2xl divide-y divide-slate-800/80 overflow-hidden">
-                {(leagueState?.drivers || [])
-                  .filter((d) => d.seriesId === bankSeriesFilter)
-                  .map((driver) => {
+                  <input
+                    type="text"
+                    value={bankSearch}
+                    onChange={(e) => setBankSearch(e.target.value)}
+                    placeholder={`Search ${SERIES_META[bankSeriesFilter].shortName} driver, car #, or team...`}
+                    className="w-full sm:w-64 min-h-[36px] bg-[#131722] border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-white focus:outline-none focus:border-[#FFD100]"
+                  />
+                </div>
+
+                <div className="bg-[#131722] border border-slate-800/90 rounded-2xl divide-y divide-slate-800/80 overflow-hidden">
+                  {filteredDrivers.map((driver) => {
                     const sId = driver.seriesId as SeriesId;
                     const meta = SERIES_META[sId];
                     const usage = getDriverRemainingUses(driver.id, sId);
@@ -2379,12 +2533,17 @@ export default function App() {
                     const raceLocked = Boolean(
                       weekendRacesBySeries[sId]?.isLockedRevealed
                     );
+                    const entryRow = enteredMap.get(driver.id);
+                    const isRacingThisWeek =
+                      enteredMap.size === 0 || Boolean(entryRow);
 
                     return (
                       <div
                         key={driver.id}
                         className={`px-3.5 py-2.5 flex items-center justify-between gap-3 ${
-                          isDepleted ? 'opacity-55' : 'hover:bg-[#181D2B]'
+                          isDepleted || !isRacingThisWeek
+                            ? 'opacity-55'
+                            : 'hover:bg-[#181D2B]'
                         }`}
                       >
                         <div className="flex items-center gap-2.5 min-w-0">
@@ -2394,7 +2553,7 @@ export default function App() {
                             #{driver.carNumber}
                           </div>
                           <div className="min-w-0">
-                            <div className="flex items-center gap-2">
+                            <div className="flex flex-wrap items-center gap-1.5">
                               <span className="font-bold text-sm text-white truncate">
                                 {driver.fullName}
                               </span>
@@ -2407,6 +2566,27 @@ export default function App() {
                               >
                                 {usage.remaining}/{usage.maxUses} Left
                               </span>
+                              {isRacingThisWeek ? (
+                                <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-mono text-[9px] font-bold">
+                                  {entryRow?.startingPosition
+                                    ? `P${entryRow.startingPosition}`
+                                    : 'ENTERED'}
+                                </span>
+                              ) : (
+                                <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-mono text-[9px] font-bold">
+                                  NOT ENTERED
+                                </span>
+                              )}
+                              {driver.isBuschwhacker && (
+                                <span className="px-1.5 py-0.5 rounded bg-[#FFD100]/15 text-[#FFD100] font-mono text-[9px] font-bold">
+                                  BUSCHWHACKER
+                                </span>
+                              )}
+                              {driver.seriesId === 1 && driver.madeLastYearChase && (
+                                <span className="px-1.5 py-0.5 rounded bg-slate-800 text-amber-300 font-mono text-[9px] font-bold">
+                                  CHASE
+                                </span>
+                              )}
                             </div>
                             <div className="text-[11px] text-slate-400 truncate">
                               {driver.team} · Used:{' '}
@@ -2424,7 +2604,9 @@ export default function App() {
                             </span>
                           ) : (
                             <button
-                              disabled={isDepleted || raceLocked}
+                              disabled={
+                                isDepleted || raceLocked || !isRacingThisWeek
+                              }
                               onClick={() =>
                                 handleSelectWeeklyPick(sId, driver.id)
                               }
@@ -2432,6 +2614,8 @@ export default function App() {
                             >
                               {isDepleted
                                 ? '0 LEFT'
+                                : !isRacingThisWeek
+                                ? 'NOT RACING'
                                 : raceLocked
                                 ? 'LOCKED'
                                 : 'START'}
@@ -2441,9 +2625,15 @@ export default function App() {
                       </div>
                     );
                   })}
+                  {filteredDrivers.length === 0 && (
+                    <div className="p-4 text-xs text-slate-400 text-center">
+                      No matching drivers found in this view.
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* ==========================================
               TAB 4: SLEEPER-STYLE DRAFT BOARD & SEASON ROSTERS
@@ -2461,55 +2651,64 @@ export default function App() {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-1.5">
-                  <button
-                    onClick={() =>
-                      setDraftOrderMode(
-                        draftOrderMode === 'reverse_standings'
-                          ? 'random'
-                          : 'reverse_standings'
-                      )
-                    }
-                    className="min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-bold bg-[#131722] border border-slate-700 text-slate-200 flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <ArrowUpDown className="w-3.5 h-3.5 text-[#FFD100]" />
-                    <span>
+                  {isCurrentUserAdmin ? (
+                    <>
+                      <button
+                        onClick={() =>
+                          setDraftOrderMode(
+                            draftOrderMode === 'reverse_standings'
+                              ? 'random'
+                              : 'reverse_standings'
+                          )
+                        }
+                        className="min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-bold bg-[#131722] border border-slate-700 text-slate-200 flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <ArrowUpDown className="w-3.5 h-3.5 text-[#FFD100]" />
+                        <span>
+                          {draftOrderMode === 'reverse_standings'
+                            ? 'Reverse Standings'
+                            : 'Random Order'}
+                        </span>
+                      </button>
+
+                      <button
+                        onClick={handleShuffleDraftOrder}
+                        className="min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-bold bg-[#131722] border border-slate-700 text-slate-200 hover:border-[#FFD100] flex items-center gap-1.5 cursor-pointer"
+                        title="Randomize draft order"
+                      >
+                        <Shuffle className="w-3.5 h-3.5 text-[#609BFF]" />
+                        <span>Shuffle</span>
+                      </button>
+
+                      <button
+                        onClick={() =>
+                          setDraftFormat(draftFormat === 'snake' ? 'linear' : 'snake')
+                        }
+                        className="min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-bold bg-[#131722] border border-slate-700 text-slate-200 cursor-pointer"
+                      >
+                        {draftFormat === 'snake' ? 'Snake Draft' : 'Linear Draft'}
+                      </button>
+
+                      <button
+                        onClick={() =>
+                          handleDraftAction(
+                            { action: 'reset_draft' },
+                            'Fresh initial draft started! Exclusive season slots cleared.'
+                          )
+                        }
+                        className="min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-bold bg-[#E4002B] text-white hover:bg-[#c80026] flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>Start Fresh Draft</span>
+                      </button>
+                    </>
+                  ) : (
+                    <span className="px-3 py-1.5 rounded-xl text-xs font-mono font-bold bg-[#131722] border border-slate-800 text-slate-300">
+                      {draftFormat === 'snake' ? 'Snake' : 'Linear'} ·{' '}
                       {draftOrderMode === 'reverse_standings'
                         ? 'Reverse Standings'
-                        : 'Random Order'}
+                        : 'Randomized'}
                     </span>
-                  </button>
-
-                  <button
-                    onClick={handleShuffleDraftOrder}
-                    className="min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-bold bg-[#131722] border border-slate-700 text-slate-200 hover:border-[#FFD100] flex items-center gap-1.5 cursor-pointer"
-                    title="Randomize draft order"
-                  >
-                    <Shuffle className="w-3.5 h-3.5 text-[#609BFF]" />
-                    <span>Shuffle</span>
-                  </button>
-
-                  <button
-                    onClick={() =>
-                      setDraftFormat(draftFormat === 'snake' ? 'linear' : 'snake')
-                    }
-                    className="min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-bold bg-[#131722] border border-slate-700 text-slate-200 cursor-pointer"
-                  >
-                    {draftFormat === 'snake' ? 'Snake Draft' : 'Linear Draft'}
-                  </button>
-
-                  {isCurrentUserAdmin && (
-                    <button
-                      onClick={() =>
-                        handleDraftAction(
-                          { action: 'reset_draft' },
-                          'Fresh initial draft started! Exclusive season slots cleared.'
-                        )
-                      }
-                      className="min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-bold bg-[#E4002B] text-white hover:bg-[#c80026] flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                      <span>Start Fresh Draft</span>
-                    </button>
                   )}
                 </div>
               </div>
@@ -2573,13 +2772,25 @@ export default function App() {
                     .filter((r) => r.slotType !== 'cup_current_chase')
                     .map((r) => r.driverId)
                 );
-                const availableDrivers = (leagueState?.drivers || []).filter(
-                  (d) =>
-                    d.seriesId === currentSlotCfg.seriesId &&
-                    !d.isBuschwhacker &&
-                    !takenExclusiveDriverIds.has(d.id) &&
-                    currentSlotCfg.filter(d)
-                );
+                const availableDrivers = (leagueState?.drivers || [])
+                  .filter(
+                    (d) =>
+                      d.seriesId === currentSlotCfg.seriesId &&
+                      !d.isBuschwhacker &&
+                      !takenExclusiveDriverIds.has(d.id) &&
+                      currentSlotCfg.filter(d)
+                  )
+                  .sort((a, b) => a.fullName.localeCompare(b.fullName));
+
+                const draftSearchQuery = draftDriverSearch.trim().toLowerCase();
+                const filteredAvailableDrivers = draftSearchQuery
+                  ? availableDrivers.filter(
+                      (d) =>
+                        d.fullName.toLowerCase().includes(draftSearchQuery) ||
+                        d.carNumber.toLowerCase().includes(draftSearchQuery) ||
+                        d.team.toLowerCase().includes(draftSearchQuery)
+                    )
+                  : availableDrivers;
 
                 return (
                   <div className="bg-[#131722] border border-[#FFD100]/60 rounded-2xl p-4 space-y-3 shadow-lg shadow-black/40">
@@ -2621,33 +2832,55 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Open Category Selector for the Manager On The Clock */}
-                    <div className="flex flex-wrap gap-1.5">
-                      {draftProgress.openSlotsForOnClock.map((st) => {
-                        const meta = slotCfg[st];
-                        const active = selectedDraftSlotType === st;
-                        return (
-                          <button
-                            key={st}
-                            onClick={() => setSelectedDraftSlotType(st)}
-                            className={`min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-bold border transition cursor-pointer ${
-                              active
-                                ? 'bg-[#1D2436] border-[#FFD100] text-white'
-                                : 'bg-[#0E111A] border-slate-800 text-slate-400 hover:text-white'
-                            }`}
-                          >
-                            <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] mr-1.5 ${meta.badge}`}>
-                              R{onClock.round}
-                            </span>
-                            {meta.label}
-                          </button>
-                        );
-                      })}
+                    {/* Open Category Selector + Search for the Manager On The Clock */}
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <div className="flex flex-wrap gap-1.5">
+                        {draftProgress.openSlotsForOnClock.map((st) => {
+                          const meta = slotCfg[st];
+                          const active = selectedDraftSlotType === st;
+                          const catAvailCount = (
+                            leagueState?.drivers || []
+                          ).filter(
+                            (d) =>
+                              d.seriesId === meta.seriesId &&
+                              !d.isBuschwhacker &&
+                              !takenExclusiveDriverIds.has(d.id) &&
+                              meta.filter(d)
+                          ).length;
+                          return (
+                            <button
+                              key={st}
+                              onClick={() => setSelectedDraftSlotType(st)}
+                              className={`min-h-[36px] px-3 py-1.5 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                                active
+                                  ? 'bg-[#1D2436] border-[#FFD100] text-white'
+                                  : 'bg-[#0E111A] border-slate-800 text-slate-400 hover:text-white'
+                              }`}
+                            >
+                              <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] mr-1.5 ${meta.badge}`}>
+                                R{onClock.round}
+                              </span>
+                              {meta.label}{' '}
+                              <span className="font-mono text-[10px] opacity-75">
+                                ({catAvailCount})
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <input
+                        type="text"
+                        value={draftDriverSearch}
+                        onChange={(e) => setDraftDriverSearch(e.target.value)}
+                        placeholder={`Search ${currentSlotCfg.label}...`}
+                        className="w-full sm:w-52 min-h-[36px] bg-[#090A0F] border border-slate-700 rounded-xl px-3 py-1 text-xs text-white focus:outline-none focus:border-[#FFD100]"
+                      />
                     </div>
 
                     {/* Available Drivers Grid */}
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-64 overflow-y-auto pr-1">
-                      {availableDrivers.map((d) => (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-72 overflow-y-auto pr-1">
+                      {filteredAvailableDrivers.map((d) => (
                         <div
                           key={d.id}
                           className="p-2.5 rounded-xl bg-[#0E111A] border border-slate-800 flex items-center justify-between gap-2"
@@ -2694,9 +2927,9 @@ export default function App() {
                           </button>
                         </div>
                       ))}
-                      {availableDrivers.length === 0 && (
+                      {filteredAvailableDrivers.length === 0 && (
                         <div className="col-span-full text-xs text-slate-400 p-3 rounded-xl bg-[#0E111A] border border-slate-800">
-                          No undrafted eligible drivers remain in this category.
+                          No undrafted eligible drivers match your filter in this category.
                         </div>
                       )}
                     </div>
@@ -2836,7 +3069,7 @@ export default function App() {
                                   ? `#${drv.carNumber} ${drv.fullName}`
                                   : 'Unassigned'}
                               </span>
-                              {isMe ? (
+                              {isMe && isCurrentUserAdmin ? (
                                 <button
                                   onClick={() =>
                                     setSwapSeasonDrawerSlot({
@@ -2850,9 +3083,27 @@ export default function App() {
                                 >
                                   Change
                                 </button>
+                              ) : isMe &&
+                                !row &&
+                                s.slotType === 'cup_current_chase' &&
+                                midSeasonChaseActive ? (
+                                <button
+                                  onClick={() =>
+                                    setSwapSeasonDrawerSlot({
+                                      slotType: s.slotType,
+                                      label: s.label,
+                                      seriesId: s.sId,
+                                      exclusive: s.exclusive,
+                                    })
+                                  }
+                                  className="ml-2 text-[11px] font-bold text-[#FFD100] hover:underline cursor-pointer"
+                                >
+                                  Pick
+                                </button>
                               ) : (
-                                <span className="ml-2 font-mono text-[10px] text-slate-400">
-                                  Anchor #{row?.fallbackCarNumber || '-'}
+                                <span className="ml-2 font-mono text-[10px] text-slate-400 flex items-center gap-1 shrink-0">
+                                  {row && <Lock className="w-2.5 h-2.5 text-slate-500" />}
+                                  <span>Anchor #{row?.fallbackCarNumber || '-'}</span>
                                 </span>
                               )}
                             </div>
@@ -3430,6 +3681,226 @@ export default function App() {
                 );
               })()}
 
+              {/* Commissioner Weekly Entry List & 2027 Driver Manager */}
+              {isCurrentUserAdmin && (() => {
+                const entryRace = weekendRacesBySeries[adminEntrySeries];
+                const enteredMap = getEnteredDriversForSeries(adminEntrySeries);
+                const q = adminEntrySearch.trim().toLowerCase();
+                const seriesDrivers = (leagueState?.drivers || [])
+                  .filter((d) => d.seriesId === adminEntrySeries)
+                  .filter((d) =>
+                    q
+                      ? d.fullName.toLowerCase().includes(q) ||
+                        d.carNumber.toLowerCase().includes(q) ||
+                        d.team.toLowerCase().includes(q)
+                      : true
+                  )
+                  .sort((a, b) => a.fullName.localeCompare(b.fullName));
+
+                return (
+                  <div className="bg-[#131722] border border-slate-800/90 rounded-2xl p-4 space-y-4">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-3">
+                      <div>
+                        <h2 className="font-display text-lg font-bold tracking-wide uppercase text-white">
+                          Weekly Starting Field &amp; Driver Manager
+                        </h2>
+                        <p className="text-xs text-slate-400">
+                          Control who is entered to race this weekend in Driver Bank/Weekly Picks, or add new 2026/2027 part-time &amp; rookie drivers.
+                        </p>
+                      </div>
+                      <span className="font-mono text-[11px] text-emerald-400 self-start">
+                        {enteredMap.size} ENTERED ({SERIES_META[adminEntrySeries].shortName})
+                      </span>
+                    </div>
+
+                    {/* Add New / 2027 Driver Form */}
+                    <div className="p-3.5 rounded-xl bg-[#0E111A] border border-slate-800 space-y-2.5">
+                      <div className="text-xs font-bold uppercase tracking-wider text-slate-300">
+                        Add Driver (New 2027 / Part-Time Entry)
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
+                        <select
+                          value={newDrvSeries}
+                          onChange={(e) =>
+                            setNewDrvSeries(Number(e.target.value) as SeriesId)
+                          }
+                          className="sm:col-span-3 min-h-[36px] bg-[#131722] border border-slate-700 rounded-lg px-2 py-1 text-xs text-white"
+                        >
+                          <option value={1}>Cup Series</option>
+                          <option value={2}>O&apos;Reilly&apos;s Series</option>
+                          <option value={3}>Truck Series</option>
+                        </select>
+                        <input
+                          type="text"
+                          placeholder="Car #"
+                          value={newDrvNumber}
+                          onChange={(e) => setNewDrvNumber(e.target.value)}
+                          className="sm:col-span-2 min-h-[36px] bg-[#131722] border border-slate-700 rounded-lg px-2.5 py-1 text-xs font-mono text-white"
+                        />
+                        <input
+                          type="text"
+                          placeholder="Driver Full Name"
+                          value={newDrvName}
+                          onChange={(e) => setNewDrvName(e.target.value)}
+                          className="sm:col-span-4 min-h-[36px] bg-[#131722] border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white"
+                        />
+                        <input
+                          type="text"
+                          placeholder="Team Name"
+                          value={newDrvTeam}
+                          onChange={(e) => setNewDrvTeam(e.target.value)}
+                          className="sm:col-span-3 min-h-[36px] bg-[#131722] border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white"
+                        />
+                      </div>
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                        <div className="flex flex-wrap items-center gap-4 text-xs text-slate-300">
+                          {newDrvSeries === 1 && (
+                            <label className="flex items-center gap-1.5 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={newDrvChase}
+                                onChange={(e) => setNewDrvChase(e.target.checked)}
+                                className="rounded accent-[#FFD100]"
+                              />
+                              <span>Cup Chase Eligible</span>
+                            </label>
+                          )}
+                          {newDrvSeries !== 1 && (
+                            <label className="flex items-center gap-1.5 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={newDrvBuschwhacker}
+                                onChange={(e) =>
+                                  setNewDrvBuschwhacker(e.target.checked)
+                                }
+                                className="rounded accent-[#FFD100]"
+                              />
+                              <span>Buschwhacker (Cup Driver)</span>
+                            </label>
+                          )}
+                        </div>
+                        <button
+                          onClick={async () => {
+                            if (!newDrvName.trim() || !newDrvNumber.trim()) {
+                              setStatusBanner({
+                                type: 'error',
+                                text: 'Enter both Car # and Driver Name.',
+                              });
+                              return;
+                            }
+                            await handleAdminTeamAction(
+                              {
+                                action: 'add_driver',
+                                seriesId: newDrvSeries,
+                                carNumber: newDrvNumber.trim(),
+                                fullName: newDrvName.trim(),
+                                team: newDrvTeam.trim() || 'Independent',
+                                madeLastYearChase:
+                                  newDrvSeries === 1 ? newDrvChase : false,
+                                inCurrentChase:
+                                  newDrvSeries === 1 ? newDrvChase : false,
+                                isBuschwhacker:
+                                  newDrvSeries !== 1 ? newDrvBuschwhacker : false,
+                                enterActiveRace: true,
+                              },
+                              `Added #${newDrvNumber.trim()} ${newDrvName.trim()} and entered into this week's field.`
+                            );
+                            setNewDrvNumber('');
+                            setNewDrvName('');
+                            setNewDrvTeam('');
+                            setNewDrvChase(false);
+                            setNewDrvBuschwhacker(false);
+                          }}
+                          className="min-h-[34px] px-4 py-1 rounded-xl bg-[#FFD100] hover:bg-[#ffe033] text-black text-xs font-bold cursor-pointer"
+                        >
+                          Add Driver &amp; Enter Race
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Weekly Race Entry List Toggle */}
+                    <div className="space-y-2">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div className="flex items-center gap-1 p-1 bg-[#0E111A] rounded-xl border border-slate-800 self-start">
+                          {([1, 2, 3] as SeriesId[]).map((sId) => (
+                            <button
+                              key={sId}
+                              onClick={() => setAdminEntrySeries(sId)}
+                              className={`min-h-[32px] px-3 py-1 rounded-lg text-xs font-bold cursor-pointer ${
+                                adminEntrySeries === sId
+                                  ? SERIES_META[sId].pylonBg
+                                  : 'text-slate-400 hover:text-white'
+                              }`}
+                            >
+                              {SERIES_META[sId].shortName}
+                            </button>
+                          ))}
+                        </div>
+                        <input
+                          type="text"
+                          value={adminEntrySearch}
+                          onChange={(e) => setAdminEntrySearch(e.target.value)}
+                          placeholder="Filter entry list..."
+                          className="w-full sm:w-56 min-h-[34px] bg-[#090A0F] border border-slate-700 rounded-xl px-3 py-1 text-xs text-white"
+                        />
+                      </div>
+
+                      <div className="max-h-60 overflow-y-auto divide-y divide-slate-800/80 rounded-xl border border-slate-800 bg-[#0E111A]">
+                        {seriesDrivers.map((d) => {
+                          const entry = enteredMap.get(d.id);
+                          const isEntered = Boolean(entry);
+                          return (
+                            <div
+                              key={d.id}
+                              className="px-3 py-2 flex items-center justify-between gap-2 text-xs"
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span
+                                  className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold ${SERIES_META[adminEntrySeries].pylonBg}`}
+                                >
+                                  #{d.carNumber}
+                                </span>
+                                <span className="font-semibold text-white truncate">
+                                  {d.fullName}
+                                </span>
+                                <span className="text-[11px] text-slate-400 truncate hidden sm:inline">
+                                  · {d.team}
+                                </span>
+                              </div>
+                              <button
+                                disabled={!entryRace}
+                                onClick={() => {
+                                  if (!entryRace) return;
+                                  handleAdminTeamAction(
+                                    {
+                                      action: 'toggle_race_entry',
+                                      raceId: entryRace.id,
+                                      seriesId: adminEntrySeries,
+                                      driverId: d.id,
+                                      isEntered: !isEntered,
+                                    },
+                                    `${d.fullName} marked ${
+                                      !isEntered ? 'ENTERED' : 'NOT ENTERED'
+                                    } for ${SERIES_META[adminEntrySeries].shortName}.`
+                                  );
+                                }}
+                                className={`min-h-[30px] px-2.5 py-1 rounded-lg font-mono text-[10px] font-bold cursor-pointer shrink-0 ${
+                                  isEntered
+                                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                    : 'bg-slate-800 text-slate-400 border border-slate-700'
+                                }`}
+                              >
+                                {isEntered ? 'ENTERED' : 'NOT ENTERED'}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Commissioner Rules Toggles (Interactive only for Admin) */}
               <div className="bg-[#131722] border border-slate-800/90 rounded-2xl p-4 space-y-3">
                 <h2 className="font-display text-lg font-bold tracking-wide uppercase text-white">
@@ -3632,30 +4103,60 @@ export default function App() {
         {/* ==========================================
             SLEEPER-STYLE BOTTOM SHEET: SWAP WEEKLY STARTER
         ========================================== */}
-        {swapWeeklyDrawerSeries !== null && (
-          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-end md:items-center justify-center p-0 md:p-4">
-            <div className="w-full max-w-lg bg-[#131722] border-t md:border border-slate-700 rounded-t-3xl md:rounded-2xl max-h-[82vh] flex flex-col overflow-hidden">
-              <div className="px-4 py-3 bg-[#181D2B] border-b border-slate-800 flex items-center justify-between">
-                <div>
-                  <h3 className="font-display text-lg font-bold tracking-wide text-white">
-                    Select {SERIES_META[swapWeeklyDrawerSeries].name} Starter
-                  </h3>
-                  <p className="text-xs text-slate-400">
-                    Max 5 uses per driver per season · Buschwhackers score full Owner Points
-                  </p>
-                </div>
-                <button
-                  onClick={() => setSwapWeeklyDrawerSeries(null)}
-                  className="p-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-white cursor-pointer"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
+        {swapWeeklyDrawerSeries !== null && (() => {
+          const enteredMap = getEnteredDriversForSeries(swapWeeklyDrawerSeries);
+          const q = weeklyDrawerSearch.trim().toLowerCase();
+          const eligibleStarters = (leagueState?.drivers || [])
+            .filter((d) => d.seriesId === swapWeeklyDrawerSeries)
+            .filter((d) => enteredMap.size === 0 || enteredMap.has(d.id))
+            .filter((d) =>
+              q
+                ? d.fullName.toLowerCase().includes(q) ||
+                  d.carNumber.toLowerCase().includes(q) ||
+                  d.team.toLowerCase().includes(q)
+                : true
+            )
+            .sort((a, b) => {
+              const posA = enteredMap.get(a.id)?.startingPosition ?? 999;
+              const posB = enteredMap.get(b.id)?.startingPosition ?? 999;
+              if (posA !== posB) return posA - posB;
+              return a.fullName.localeCompare(b.fullName);
+            });
 
-              <div className="flex-1 overflow-y-auto divide-y divide-slate-800/80 p-2">
-                {(leagueState?.drivers || [])
-                  .filter((d) => d.seriesId === swapWeeklyDrawerSeries)
-                  .map((d) => {
+          return (
+            <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-end md:items-center justify-center p-0 md:p-4">
+              <div className="w-full max-w-lg bg-[#131722] border-t md:border border-slate-700 rounded-t-3xl md:rounded-2xl max-h-[82vh] flex flex-col overflow-hidden">
+                <div className="px-4 py-3 bg-[#181D2B] border-b border-slate-800 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="font-display text-lg font-bold tracking-wide text-white">
+                        Select {SERIES_META[swapWeeklyDrawerSeries].name} Starter
+                      </h3>
+                      <p className="text-xs text-slate-400">
+                        {eligibleStarters.length} entered this week · Max 5 uses/season · Buschwhackers earn Owner Pts
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setSwapWeeklyDrawerSeries(null);
+                        setWeeklyDrawerSearch('');
+                      }}
+                      className="p-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-white cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    value={weeklyDrawerSearch}
+                    onChange={(e) => setWeeklyDrawerSearch(e.target.value)}
+                    placeholder="Search driver, car #, or team..."
+                    className="w-full min-h-[36px] bg-[#090A0F] border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-white focus:outline-none focus:border-[#FFD100]"
+                  />
+                </div>
+
+                <div className="flex-1 overflow-y-auto divide-y divide-slate-800/80 p-2">
+                  {eligibleStarters.map((d) => {
                     const usage = getDriverRemainingUses(
                       d.id,
                       swapWeeklyDrawerSeries
@@ -3665,6 +4166,7 @@ export default function App() {
                     const liveRes = computedWeekendResults[
                       swapWeeklyDrawerSeries
                     ].find((r) => r.nascar_driver_id === d.nascarDriverId);
+                    const entryRow = enteredMap.get(d.id);
 
                     return (
                       <div
@@ -3678,10 +4180,22 @@ export default function App() {
                             #{d.carNumber}
                           </div>
                           <div className="min-w-0">
-                            <div className="font-bold text-sm text-white truncate">
-                              {d.fullName}
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-bold text-sm text-white truncate">
+                                {d.fullName}
+                              </span>
+                              {entryRow?.startingPosition && (
+                                <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-mono text-[9px] font-bold">
+                                  P{entryRow.startingPosition}
+                                </span>
+                              )}
+                              {d.isBuschwhacker && (
+                                <span className="px-1.5 py-0.5 rounded bg-[#FFD100]/15 text-[#FFD100] font-mono text-[9px] font-bold">
+                                  BW
+                                </span>
+                              )}
                             </div>
-                            <div className="text-[11px] text-slate-400 font-mono">
+                            <div className="text-[11px] text-slate-400 font-mono truncate">
                               {usage.remaining}/{usage.maxUses} Uses Left ·{' '}
                               {liveRes
                                 ? `${liveRes.effective_fantasy_points} Pts (P${liveRes.finish_position})`
@@ -3692,9 +4206,10 @@ export default function App() {
 
                         <button
                           disabled={isDepleted}
-                          onClick={() =>
-                            handleSelectWeeklyPick(swapWeeklyDrawerSeries, d.id)
-                          }
+                          onClick={() => {
+                            handleSelectWeeklyPick(swapWeeklyDrawerSeries, d.id);
+                            setWeeklyDrawerSearch('');
+                          }}
                           className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer shrink-0 ${
                             usage.isCurrentlyPicked
                               ? 'bg-emerald-500 text-black'
@@ -3712,53 +4227,62 @@ export default function App() {
                       </div>
                     );
                   })}
+                  {eligibleStarters.length === 0 && (
+                    <div className="p-4 text-xs text-slate-400 text-center">
+                      No entered drivers match your search.
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* ==========================================
             SLEEPER-STYLE BOTTOM SHEET: EDIT SEASON ROSTER SLOT
         ========================================== */}
-        {swapSeasonDrawerSlot !== null && (
-          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-end md:items-center justify-center p-0 md:p-4">
-            <div className="w-full max-w-lg bg-[#131722] border-t md:border border-slate-700 rounded-t-3xl md:rounded-2xl max-h-[82vh] flex flex-col overflow-hidden">
-              <div className="px-4 py-3 bg-[#181D2B] border-b border-slate-800 flex items-center justify-between">
-                <div>
-                  <h3 className="font-display text-lg font-bold tracking-wide text-white">
-                    Draft / Edit Season Slot: {swapSeasonDrawerSlot.label}
-                  </h3>
-                  <p className="text-xs text-slate-400">
-                    {swapSeasonDrawerSlot.exclusive
-                      ? 'Exclusive Slot: Drivers owned by other managers are locked.'
-                      : '5th Mid-Season Chase Bonus: Duplicates allowed across league!'}
-                  </p>
-                </div>
-                <button
-                  onClick={() => setSwapSeasonDrawerSlot(null)}
-                  className="p-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-white cursor-pointer"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
+        {swapSeasonDrawerSlot !== null && (() => {
+          const eligibleList = (leagueState?.drivers || [])
+            .filter((d) => {
+              if (
+                d.seriesId !== swapSeasonDrawerSlot.seriesId ||
+                d.isBuschwhacker
+              )
+                return false;
+              if (swapSeasonDrawerSlot.slotType === 'cup_prev_chase')
+                return d.madeLastYearChase;
+              if (swapSeasonDrawerSlot.slotType === 'cup_prev_non_chase')
+                return !d.madeLastYearChase;
+              if (swapSeasonDrawerSlot.slotType === 'cup_current_chase')
+                return d.inCurrentChase;
+              return true;
+            })
+            .sort((a, b) => a.fullName.localeCompare(b.fullName));
 
-              <div className="flex-1 overflow-y-auto divide-y divide-slate-800/80 p-2">
-                {(leagueState?.drivers || [])
-                  .filter((d) => {
-                    if (
-                      d.seriesId !== swapSeasonDrawerSlot.seriesId ||
-                      d.isBuschwhacker
-                    )
-                      return false;
-                    if (swapSeasonDrawerSlot.slotType === 'cup_prev_chase')
-                      return d.madeLastYearChase;
-                    if (swapSeasonDrawerSlot.slotType === 'cup_prev_non_chase')
-                      return !d.madeLastYearChase;
-                    if (swapSeasonDrawerSlot.slotType === 'cup_current_chase')
-                      return d.inCurrentChase;
-                    return true;
-                  })
-                  .map((d) => {
+          return (
+            <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-end md:items-center justify-center p-0 md:p-4">
+              <div className="w-full max-w-lg bg-[#131722] border-t md:border border-slate-700 rounded-t-3xl md:rounded-2xl max-h-[82vh] flex flex-col overflow-hidden">
+                <div className="px-4 py-3 bg-[#181D2B] border-b border-slate-800 flex items-center justify-between">
+                  <div>
+                    <h3 className="font-display text-lg font-bold tracking-wide text-white">
+                      {swapSeasonDrawerSlot.label} ({eligibleList.length} Drivers)
+                    </h3>
+                    <p className="text-xs text-slate-400">
+                      {swapSeasonDrawerSlot.exclusive
+                        ? 'Exclusive Slot: Drivers owned by other managers are locked.'
+                        : '5th Mid-Season Chase Bonus: Duplicates allowed across league!'}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setSwapSeasonDrawerSlot(null)}
+                    className="p-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-white cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto divide-y divide-slate-800/80 p-2">
+                  {eligibleList.map((d) => {
                     const lockedByRival = swapSeasonDrawerSlot.exclusive
                       ? (leagueState?.seasonRosters || []).find(
                           (r) =>
@@ -3819,10 +4343,11 @@ export default function App() {
                       </div>
                     );
                   })}
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* ==========================================
             COMMISSIONER MODAL: ADD LEAGUE MEMBER MANUALLY
