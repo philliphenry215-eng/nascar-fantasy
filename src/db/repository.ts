@@ -1,7 +1,9 @@
-import { eq, and, ne } from 'drizzle-orm';
+import crypto from 'node:crypto';
+import { eq, and, ne, isNull } from 'drizzle-orm';
 import { db } from './index.ts';
 import {
   users,
+  leagueSettings,
   seriesConfig,
   drivers,
   races,
@@ -15,241 +17,404 @@ import {
   NascarStageFeed,
   ComputedRaceResult,
 } from '../lib/nascar-scoring-engine.ts';
+import { hashPassword, verifyPassword } from '../lib/session.ts';
 
 let syncInProgressPromise: Promise<Record<1 | 2 | 3, ComputedRaceResult[]>> | null =
   null;
+let referenceSeeded = false;
+let seedPromise: Promise<void> | null = null;
 
-export async function getOrCreateUser(
-  uid: string,
-  email: string,
-  displayName?: string
-) {
-  try {
-    const existingByUid = await db
-      .select()
-      .from(users)
-      .where(eq(users.uid, uid));
-
-    if (existingByUid.length > 0) {
-      const updated = await db
-        .update(users)
-        .set({
-          email,
-          name: displayName ? `${displayName} (You)` : existingByUid[0].name,
-        })
-        .where(eq(users.uid, uid))
-        .returning();
-      return updated[0];
-    }
-
-    const primarySeat = await db
-      .select()
-      .from(users)
-      .where(eq(users.id, 'u1'));
-
-    if (primarySeat.length > 0 && primarySeat[0].uid === 'seed-uid-u1') {
-      const bound = await db
-        .update(users)
-        .set({
-          uid,
-          email,
-          name: displayName ? `${displayName} (You)` : primarySeat[0].name,
-        })
-        .where(eq(users.id, 'u1'))
-        .returning();
-      return bound[0];
-    }
-
-    const avatarInitials = (displayName || email || 'PB')
-      .split(' ')
-      .map((p) => p[0])
-      .join('')
-      .toUpperCase()
-      .slice(0, 2);
-
-    const result = await db
-      .insert(users)
-      .values({
-        id: `user_${uid.slice(0, 8)}`,
-        uid,
-        email,
-        name: displayName || email.split('@')[0] || 'Pit Box Manager',
-        avatar: avatarInitials || 'PB',
-        lastYearRank: 7,
-        role: 'member',
-        cumulativePriorPoints: 2250,
-      })
-      .onConflictDoUpdate({
-        target: users.uid,
-        set: {
-          email,
-        },
-      })
-      .returning();
-
-    return result[0];
-  } catch (error) {
-    console.error('Database error in getOrCreateUser:', error);
-    throw new Error('Failed to synchronize user profile.', { cause: error });
-  }
+/**
+ * Strips sensitive fields like `passwordHash` before returning user rows to callers.
+ */
+export function sanitizeUser(u: typeof users.$inferSelect) {
+  return {
+    id: u.id,
+    uid: u.uid,
+    email: u.email,
+    name: u.name,
+    avatar: u.avatar,
+    lastYearRank: u.lastYearRank,
+    role: u.role,
+    cumulativePriorPoints: u.cumulativePriorPoints,
+    createdAt: u.createdAt,
+  };
 }
 
-export async function joinLeagueMember(params: {
-  name: string;
-  email?: string;
-  avatar?: string;
-  inviteCode?: string;
-}) {
-  try {
-    const cleanName = params.name.trim();
-    if (!cleanName) {
-      throw new Error('Please enter your Manager or Team Name.');
-    }
+/**
+ * Idempotently seeds canonical league config, NASCAR series, drivers, and races (never fake users or picks).
+ */
+export async function ensureReferenceDataSeeded(): Promise<void> {
+  if (referenceSeeded) return;
+  if (seedPromise) return seedPromise;
 
-    const allUsers = await db.select().from(users);
-    const nextRank = allUsers.length + 1;
-    const newId = `u_${Date.now().toString(36)}`;
-    const initials =
-      params.avatar?.trim().toUpperCase().slice(0, 2) ||
-      cleanName
-        .split(' ')
-        .map((w) => w[0])
-        .join('')
-        .toUpperCase()
-        .slice(0, 2) ||
-      'NP';
-
-    const insertedUser = await db
-      .insert(users)
-      .values({
-        id: newId,
-        uid: `invite_${newId}`,
-        email:
-          params.email?.trim() ||
-          `${cleanName.toLowerCase().replace(/[^a-z0-9]/g, '')}@pitboxfantasy.com`,
-        name: cleanName,
-        avatar: initials,
-        lastYearRank: nextRank,
-        role: 'member',
-        cumulativePriorPoints: 2300,
-      })
-      .returning();
-
-    // Check whether teams already have drafted exclusive rosters
-    const allRosters = await db.select().from(seasonRosters);
-    const hasActiveExclusiveRosters = allRosters.some(
-      (r) => r.slotType !== 'cup_current_chase'
-    );
-
-    if (hasActiveExclusiveRosters) {
-      const allDrivers = await db.select().from(drivers);
-      const takenIds = new Set(
-        allRosters
-          .filter((r) => r.slotType !== 'cup_current_chase')
-          .map((r) => r.driverId)
-      );
-
-      const pickOpenDriver = (
-        sId: number,
-        filterFn: (d: typeof allDrivers[0]) => boolean
-      ) =>
-        allDrivers.find(
-          (d) =>
-            d.seriesId === sId &&
-            !d.isBuschwhacker &&
-            !takenIds.has(d.id) &&
-            filterFn(d)
-        );
-
-      const cupChaseDrv = pickOpenDriver(1, (d) => d.madeLastYearChase);
-      if (cupChaseDrv) takenIds.add(cupChaseDrv.id);
-      const cupNonChaseDrv = pickOpenDriver(1, (d) => !d.madeLastYearChase);
-      if (cupNonChaseDrv) takenIds.add(cupNonChaseDrv.id);
-      const oreillyDrv = pickOpenDriver(2, () => true);
-      if (oreillyDrv) takenIds.add(oreillyDrv.id);
-      const truckDrv = pickOpenDriver(3, () => true);
-      if (truckDrv) takenIds.add(truckDrv.id);
-
-      const starterSlots = [
-        cupChaseDrv && {
-          seriesId: 1,
-          slotType: 'cup_prev_chase',
-          driverId: cupChaseDrv.id,
-          fallbackCarNumber: cupChaseDrv.carNumber,
-        },
-        cupNonChaseDrv && {
-          seriesId: 1,
-          slotType: 'cup_prev_non_chase',
-          driverId: cupNonChaseDrv.id,
-          fallbackCarNumber: cupNonChaseDrv.carNumber,
-        },
-        oreillyDrv && {
-          seriesId: 2,
-          slotType: 'oreillys_season',
-          driverId: oreillyDrv.id,
-          fallbackCarNumber: oreillyDrv.carNumber,
-        },
-        truckDrv && {
-          seriesId: 3,
-          slotType: 'trucks_season',
-          driverId: truckDrv.id,
-          fallbackCarNumber: truckDrv.carNumber,
-        },
-        {
-          seriesId: 1,
-          slotType: 'cup_current_chase',
-          driverId: 'c1',
-          fallbackCarNumber: '5',
-        },
-      ].filter(Boolean) as Array<{
-        seriesId: number;
-        slotType: string;
-        driverId: string;
-        fallbackCarNumber: string;
-      }>;
-
-      for (const s of starterSlots) {
-        await db
-          .insert(seasonRosters)
-          .values({
-            userId: newId,
-            seriesId: s.seriesId,
-            slotType: s.slotType,
-            driverId: s.driverId,
-            fallbackCarNumber: s.fallbackCarNumber,
-          })
-          .onConflictDoNothing();
-      }
-    }
-
-    // Assign default weekly picks for the active weekend
-    const defaultWeekly = [
-      { raceId: 'r_cup_bristol', seriesId: 1, driverId: 'c7' },
-      { raceId: 'r_oreillys_bristol', seriesId: 2, driverId: 'o_bw1' },
-      { raceId: 'r_trucks_bristol', seriesId: 3, driverId: 't_bw1' },
-    ];
-
-    for (const wp of defaultWeekly) {
+  seedPromise = (async () => {
+    try {
       await db
-        .insert(weeklyPicks)
+        .insert(leagueSettings)
         .values({
-          userId: newId,
-          raceId: wp.raceId,
-          seriesId: wp.seriesId,
-          driverId: wp.driverId,
-          trackLabel: 'Bristol Night',
-          isHistorical: false,
+          id: 'default',
+          leagueName: 'Pit Box Fantasy League',
+          inviteCode: 'PITBOX-2026',
         })
         .onConflictDoNothing();
+
+      await db
+        .insert(seriesConfig)
+        .values([
+          {
+            id: 1,
+            name: 'NASCAR Cup Series',
+            shortName: 'Cup',
+            badgeColor: '#FFD100',
+            maxWeeklyUsesPerDriver: 5,
+            chaseActive: true,
+            firstPlacePoints: 55,
+            useCarAnchorFallback: true,
+          },
+          {
+            id: 2,
+            name: "NASCAR O'Reilly's Series",
+            shortName: "O'Reilly's",
+            badgeColor: '#E4002B',
+            maxWeeklyUsesPerDriver: 5,
+            chaseActive: true,
+            firstPlacePoints: 55,
+            useCarAnchorFallback: true,
+          },
+          {
+            id: 3,
+            name: 'NASCAR Craftsman Truck Series',
+            shortName: 'Trucks',
+            badgeColor: '#1D63FF',
+            maxWeeklyUsesPerDriver: 5,
+            chaseActive: true,
+            firstPlacePoints: 55,
+            useCarAnchorFallback: true,
+          },
+        ])
+        .onConflictDoNothing();
+
+      const canonicalDrivers: Array<typeof drivers.$inferInsert> = [
+        // Cup Series - Chase (Prev Playoff Drivers)
+        { id: 'c1', nascarDriverId: 4001, seriesId: 1, carNumber: '5', fullName: 'Kyle Larson', team: 'Hendrick Motorsports', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
+        { id: 'c2', nascarDriverId: 4002, seriesId: 1, carNumber: '24', fullName: 'William Byron', team: 'Hendrick Motorsports', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
+        { id: 'c3', nascarDriverId: 4003, seriesId: 1, carNumber: '12', fullName: 'Ryan Blaney', team: 'Team Penske', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
+        { id: 'c4', nascarDriverId: 4004, seriesId: 1, carNumber: '20', fullName: 'Christopher Bell', team: 'Joe Gibbs Racing', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
+        { id: 'c5', nascarDriverId: 4005, seriesId: 1, carNumber: '11', fullName: 'Denny Hamlin', team: 'Joe Gibbs Racing', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
+        { id: 'c6', nascarDriverId: 4006, seriesId: 1, carNumber: '9', fullName: 'Chase Elliott', team: 'Hendrick Motorsports', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
+        { id: 'c7', nascarDriverId: 4007, seriesId: 1, carNumber: '45', fullName: 'Tyler Reddick', team: '23XI Racing', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
+        { id: 'c8', nascarDriverId: 4008, seriesId: 1, carNumber: '48', fullName: 'Alex Bowman', team: 'Hendrick Motorsports', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
+        { id: 'c9', nascarDriverId: 4009, seriesId: 1, carNumber: '22', fullName: 'Joey Logano', team: 'Team Penske', madeLastYearChase: true, inCurrentChase: true, isBuschwhacker: false, active: true },
+
+        // Cup Series - Non-Chase
+        { id: 'cn1', nascarDriverId: 4101, seriesId: 1, carNumber: '8', fullName: 'Kyle Busch', team: 'Richard Childress Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'cn2', nascarDriverId: 4102, seriesId: 1, carNumber: '17', fullName: 'Chris Buescher', team: 'RFK Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'cn3', nascarDriverId: 4103, seriesId: 1, carNumber: '23', fullName: 'Bubba Wallace', team: '23XI Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'cn4', nascarDriverId: 4104, seriesId: 1, carNumber: '1', fullName: 'Ross Chastain', team: 'Trackhouse Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'cn5', nascarDriverId: 4105, seriesId: 1, carNumber: '54', fullName: 'Ty Gibbs', team: 'Joe Gibbs Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'cn6', nascarDriverId: 4106, seriesId: 1, carNumber: '71', fullName: 'Michael McDowell', team: 'Spire Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'cn7', nascarDriverId: 4107, seriesId: 1, carNumber: '6', fullName: 'Brad Keselowski', team: 'RFK Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'cn8', nascarDriverId: 4108, seriesId: 1, carNumber: '21', fullName: 'Josh Berry', team: 'Wood Brothers Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+
+        // O'Reilly's Series - Regulars & Buschwhackers
+        { id: 'o1', nascarDriverId: 5001, seriesId: 2, carNumber: '88', fullName: 'Connor Zilisch', team: 'JR Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o2', nascarDriverId: 5002, seriesId: 2, carNumber: '7', fullName: 'Justin Allgaier', team: 'JR Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o3', nascarDriverId: 5003, seriesId: 2, carNumber: '21', fullName: 'Austin Hill', team: 'Richard Childress Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o4', nascarDriverId: 5004, seriesId: 2, carNumber: '2', fullName: 'Jesse Love', team: 'Richard Childress Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o5', nascarDriverId: 5005, seriesId: 2, carNumber: '00', fullName: 'Sheldon Creed', team: 'Haas Factory Team', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o6', nascarDriverId: 5006, seriesId: 2, carNumber: '1', fullName: 'Carson Kvapil', team: 'JR Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o7', nascarDriverId: 5007, seriesId: 2, carNumber: '8', fullName: 'Sammy Smith', team: 'JR Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o8', nascarDriverId: 5008, seriesId: 2, carNumber: '41', fullName: 'Sam Mayer', team: 'Haas Factory Team', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 'o_bw1', nascarDriverId: 4001, seriesId: 2, carNumber: '17', fullName: 'Kyle Larson', team: 'Hendrick Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: true, active: true },
+        { id: 'o_bw2', nascarDriverId: 4006, seriesId: 2, carNumber: '9', fullName: 'Chase Elliott', team: 'JR Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: true, active: true },
+
+        // Truck Series - Regulars & Buschwhacker
+        { id: 't1', nascarDriverId: 6001, seriesId: 3, carNumber: '11', fullName: 'Corey Heim', team: 'TRICON Garage', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't2', nascarDriverId: 6002, seriesId: 3, carNumber: '34', fullName: 'Layne Riggs', team: 'Front Row Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't3', nascarDriverId: 6003, seriesId: 3, carNumber: '98', fullName: 'Ty Majeski', team: 'ThorSport Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't4', nascarDriverId: 6004, seriesId: 3, carNumber: '9', fullName: 'Grant Enfinger', team: 'CR7 Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't5', nascarDriverId: 6005, seriesId: 3, carNumber: '19', fullName: 'Christian Eckes', team: 'McAnally-Hilgemann', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't6', nascarDriverId: 6006, seriesId: 3, carNumber: '71', fullName: 'Rajah Caruth', team: 'Spire Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't7', nascarDriverId: 6007, seriesId: 3, carNumber: '38', fullName: 'Chandler Smith', team: 'Front Row Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't8', nascarDriverId: 6008, seriesId: 3, carNumber: '52', fullName: 'Stewart Friesen', team: 'Halmar Friesen Racing', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: false, active: true },
+        { id: 't_bw1', nascarDriverId: 4101, seriesId: 3, carNumber: '7', fullName: 'Kyle Busch', team: 'Spire Motorsports', madeLastYearChase: false, inCurrentChase: false, isBuschwhacker: true, active: true },
+      ];
+
+      await db.insert(drivers).values(canonicalDrivers).onConflictDoNothing();
+
+      await db
+        .insert(races)
+        .values([
+          {
+            id: 'r_cup_bristol',
+            nascarRaceId: 5501,
+            seriesId: 1,
+            weekendGroupId: '2026-W36',
+            raceName: 'Bass Pro Shops Night Race',
+            trackName: 'Bristol Motor Speedway',
+            raceStartTime: new Date('2026-09-20T23:30:00Z'),
+            isChaseRace: true,
+            isLockedRevealed: false,
+            isActiveWeekend: true,
+            syncStatus: 'upcoming',
+          },
+          {
+            id: 'r_oreillys_bristol',
+            nascarRaceId: 5502,
+            seriesId: 2,
+            weekendGroupId: '2026-W36',
+            raceName: 'Food City 300',
+            trackName: 'Bristol Motor Speedway',
+            raceStartTime: new Date('2026-09-19T23:30:00Z'),
+            isChaseRace: false,
+            isLockedRevealed: false,
+            isActiveWeekend: true,
+            syncStatus: 'upcoming',
+          },
+          {
+            id: 'r_trucks_bristol',
+            nascarRaceId: 5503,
+            seriesId: 3,
+            weekendGroupId: '2026-W36',
+            raceName: 'UNOH 200',
+            trackName: 'Bristol Motor Speedway',
+            raceStartTime: new Date('2026-09-18T00:00:00Z'),
+            isChaseRace: false,
+            isLockedRevealed: false,
+            isActiveWeekend: true,
+            syncStatus: 'upcoming',
+          },
+        ])
+        .onConflictDoNothing();
+
+      referenceSeeded = true;
+    } catch (error) {
+      seedPromise = null;
+      throw error;
+    }
+  })();
+
+  return seedPromise;
+}
+
+/**
+ * Returns non-sensitive league bootstrap info for the unauthenticated Login Homescreen.
+ */
+export async function getAuthBootstrapInfo() {
+  await ensureReferenceDataSeeded();
+  const [allUsers, settingsRows] = await Promise.all([
+    db.select().from(users),
+    db.select().from(leagueSettings).where(eq(leagueSettings.id, 'default')),
+  ]);
+
+  const activeUsers = allUsers.filter((u) => Boolean(u.passwordHash));
+  const hasAdmin = activeUsers.some((u) => u.role === 'admin');
+
+  return {
+    hasAdmin,
+    memberCount: activeUsers.length,
+    leagueName: settingsRows[0]?.leagueName || 'Pit Box Fantasy League',
+  };
+}
+
+/**
+ * Fetches an authenticated user profile by ID without exposing `passwordHash`.
+ */
+export async function getUserById(userId: string) {
+  await ensureReferenceDataSeeded();
+  const rows = await db.select().from(users).where(eq(users.id, userId));
+  if (rows.length === 0 || !rows[0].passwordHash) return null;
+  return sanitizeUser(rows[0]);
+}
+
+function buildAvatarInitials(name: string): string {
+  const letters = name
+    .replace(/\(.*?\)/g, '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => w[0])
+    .join('')
+    .toUpperCase()
+    .slice(0, 2);
+  return letters || 'PB';
+}
+
+/**
+ * Registers a user account. First account automatically becomes League Commissioner; later sign-ups verify invite code.
+ */
+export async function registerAccount(params: {
+  name: string;
+  email: string;
+  password: string;
+  inviteCode?: string;
+  leagueName?: string;
+}) {
+  await ensureReferenceDataSeeded();
+
+  const cleanName = params.name.trim();
+  const cleanEmail = params.email.trim().toLowerCase();
+  const password = params.password || '';
+
+  if (cleanName.length < 2) {
+    throw new Error('Manager or Team Name must be at least 2 characters.');
+  }
+  if (!cleanEmail.includes('@') || !cleanEmail.includes('.')) {
+    throw new Error('Please enter a valid email address.');
+  }
+  if (password.length < 6) {
+    throw new Error('Password must be at least 6 characters.');
+  }
+
+  let existingUsers = await db.select().from(users);
+  const hasAdmin = existingUsers.some(
+    (u) => u.role === 'admin' && Boolean(u.passwordHash)
+  );
+
+  let assignedRole: 'admin' | 'member' = 'member';
+
+  if (!hasAdmin) {
+    // Clean up any stale passwordless orphaned rows left over from unauthenticated onboarding
+    const orphanUsers = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(isNull(users.passwordHash));
+
+    for (const orphan of orphanUsers) {
+      await db.delete(weeklyPicks).where(eq(weeklyPicks.userId, orphan.id));
+      await db.delete(seasonRosters).where(eq(seasonRosters.userId, orphan.id));
+      await db.delete(users).where(eq(users.id, orphan.id));
     }
 
-    return insertedUser[0];
-  } catch (error) {
-    throw new Error(
-      error instanceof Error ? error.message : 'Failed to join league.',
-      { cause: error }
-    );
+    existingUsers = await db.select().from(users);
+    assignedRole = 'admin';
+
+    const settingsUpdate: Partial<typeof leagueSettings.$inferInsert> = {
+      updatedAt: new Date(),
+    };
+    if (params.leagueName && params.leagueName.trim()) {
+      settingsUpdate.leagueName = params.leagueName.trim();
+    }
+    if (params.inviteCode && params.inviteCode.trim()) {
+      settingsUpdate.inviteCode = params.inviteCode.trim().toUpperCase();
+    }
+    if (settingsUpdate.leagueName || settingsUpdate.inviteCode) {
+      await db
+        .update(leagueSettings)
+        .set(settingsUpdate)
+        .where(eq(leagueSettings.id, 'default'));
+    }
+  } else {
+    const settingsRows = await db
+      .select()
+      .from(leagueSettings)
+      .where(eq(leagueSettings.id, 'default'));
+    const expectedCode = (settingsRows[0]?.inviteCode || 'PITBOX-2026')
+      .trim()
+      .toUpperCase();
+    const submittedCode = (params.inviteCode || '').trim().toUpperCase();
+    if (!submittedCode || submittedCode !== expectedCode) {
+      throw new Error(
+        'Invalid League Invite Code. Ask your Commissioner for the current code.'
+      );
+    }
   }
+
+  if (existingUsers.some((u) => u.email.toLowerCase() === cleanEmail)) {
+    throw new Error('An account with that email already exists. Please sign in.');
+  }
+
+  const activeCount = existingUsers.filter((u) => Boolean(u.passwordHash)).length;
+  const newId = `u_${crypto.randomBytes(6).toString('hex')}`;
+  const inserted = await db
+    .insert(users)
+    .values({
+      id: newId,
+      uid: `local_${newId}`,
+      email: cleanEmail,
+      passwordHash: hashPassword(password),
+      name: cleanName,
+      avatar: buildAvatarInitials(cleanName),
+      lastYearRank: activeCount + 1,
+      role: assignedRole,
+      cumulativePriorPoints: 0,
+    })
+    .returning();
+
+  return sanitizeUser(inserted[0]);
+}
+
+/**
+ * Verifies email and password and returns the sanitized user record.
+ */
+export async function loginAccount(params: { email: string; password: string }) {
+  await ensureReferenceDataSeeded();
+  const cleanEmail = (params.email || '').trim().toLowerCase();
+  const password = params.password || '';
+
+  if (!cleanEmail || !password) {
+    throw new Error('Invalid email or password.');
+  }
+
+  const allUsers = await db.select().from(users);
+  const matched = allUsers.find((u) => u.email.toLowerCase() === cleanEmail);
+
+  if (!matched || !verifyPassword(password, matched.passwordHash)) {
+    throw new Error('Invalid email or password.');
+  }
+
+  return sanitizeUser(matched);
+}
+
+/**
+ * Allows the League Commissioner to create an authenticated member account directly without invite codes.
+ */
+export async function adminCreateMember(params: {
+  adminUserId: string;
+  name: string;
+  email: string;
+  password: string;
+}) {
+  await ensureReferenceDataSeeded();
+  await verifyAdminUser(params.adminUserId);
+
+  const cleanName = (params.name || '').trim();
+  const cleanEmail = (params.email || '').trim().toLowerCase();
+  const password = params.password || '';
+
+  if (cleanName.length < 2) {
+    throw new Error('Manager or Team Name must be at least 2 characters.');
+  }
+  if (!cleanEmail.includes('@') || !cleanEmail.includes('.')) {
+    throw new Error('Please enter a valid email address.');
+  }
+  if (password.length < 6) {
+    throw new Error('Initial password must be at least 6 characters.');
+  }
+
+  const existingUsers = await db.select().from(users);
+  if (existingUsers.some((u) => u.email.toLowerCase() === cleanEmail)) {
+    throw new Error('An account with that email already exists.');
+  }
+
+  const newId = `u_${crypto.randomBytes(6).toString('hex')}`;
+  const inserted = await db
+    .insert(users)
+    .values({
+      id: newId,
+      uid: `local_${newId}`,
+      email: cleanEmail,
+      passwordHash: hashPassword(password),
+      name: cleanName,
+      avatar: buildAvatarInitials(cleanName),
+      lastYearRank: existingUsers.length + 1,
+      role: 'member',
+      cumulativePriorPoints: 0,
+    })
+    .returning();
+
+  return sanitizeUser(inserted[0]);
 }
 
 export function buildWeekendSimulationFeeds(
@@ -381,6 +546,7 @@ export async function syncRaceResultsToDatabase(
 
   syncInProgressPromise = (async () => {
     try {
+      await ensureReferenceDataSeeded();
       const computedBySeries = buildWeekendSimulationFeeds(
         firstPlacePoints,
         simulateZilischInjury
@@ -476,10 +642,16 @@ export async function syncRaceResultsToDatabase(
   return syncInProgressPromise;
 }
 
-export async function getFullLeagueState() {
+export async function getFullLeagueState(viewer?: {
+  id: string;
+  role: string;
+}) {
   try {
+    await ensureReferenceDataSeeded();
+
     const [
       allUsers,
+      allSettings,
       allSeries,
       allDrivers,
       allRaces,
@@ -488,6 +660,7 @@ export async function getFullLeagueState() {
       allResults,
     ] = await Promise.all([
       db.select().from(users),
+      db.select().from(leagueSettings).where(eq(leagueSettings.id, 'default')),
       db.select().from(seriesConfig),
       db.select().from(drivers),
       db.select().from(races),
@@ -504,13 +677,35 @@ export async function getFullLeagueState() {
       currentResults = await db.select().from(raceDriverResults);
     }
 
+    const raceLockedMap = new Map(
+      allRaces.map((r) => [r.id, r.isLockedRevealed])
+    );
+
+    const maskedPicks = allPicks.map((p) => {
+      const isLocked = Boolean(raceLockedMap.get(p.raceId));
+      const canView =
+        p.isHistorical ||
+        isLocked ||
+        (viewer && (viewer.role === 'admin' || p.userId === viewer.id));
+      return canView ? p : { ...p, driverId: '__HIDDEN__' };
+    });
+
+    const settingsRow = allSettings[0];
+
     return {
-      users: allUsers,
+      leagueSettings: {
+        leagueName: settingsRow?.leagueName || 'Pit Box Fantasy League',
+        inviteCode:
+          viewer?.role === 'admin'
+            ? settingsRow?.inviteCode || 'PITBOX-2026'
+            : null,
+      },
+      users: allUsers.filter((u) => Boolean(u.passwordHash)).map(sanitizeUser),
       seriesConfig: allSeries,
       drivers: allDrivers,
       races: allRaces,
       seasonRosters: allRosters,
-      weeklyPicks: allPicks,
+      weeklyPicks: maskedPicks,
       raceDriverResults: currentResults,
     };
   } catch (error) {
@@ -650,6 +845,9 @@ export async function updateSeasonRosterSlot(params: {
 }
 
 export async function updateLeagueAdminSettings(params: {
+  adminUserId: string;
+  leagueName?: string;
+  inviteCode?: string;
   firstPlacePoints?: 55 | 40;
   useCarAnchorFallback?: boolean;
   chaseActive?: boolean;
@@ -658,6 +856,24 @@ export async function updateLeagueAdminSettings(params: {
   activeSeriesWeekend?: Record<number, boolean>;
 }) {
   try {
+    await ensureReferenceDataSeeded();
+    const admin = await verifyAdminUser(params.adminUserId);
+
+    const settingsPatch: Partial<typeof leagueSettings.$inferInsert> = {};
+    if (params.leagueName !== undefined && params.leagueName.trim()) {
+      settingsPatch.leagueName = params.leagueName.trim();
+    }
+    if (params.inviteCode !== undefined && params.inviteCode.trim()) {
+      settingsPatch.inviteCode = params.inviteCode.trim().toUpperCase();
+    }
+    if (Object.keys(settingsPatch).length > 0) {
+      settingsPatch.updatedAt = new Date();
+      await db
+        .update(leagueSettings)
+        .set(settingsPatch)
+        .where(eq(leagueSettings.id, 'default'));
+    }
+
     const currentSeries = await db.select().from(seriesConfig);
     const cupCfg = currentSeries.find((s) => s.id === 1);
 
@@ -719,21 +935,22 @@ export async function updateLeagueAdminSettings(params: {
         : true;
 
     await syncRaceResultsToDatabase(nextFirstPlace, simZilisch);
-    return await getFullLeagueState();
+    return await getFullLeagueState({ id: admin.id, role: admin.role });
   } catch (error) {
     console.error('Database error in updateLeagueAdminSettings:', error);
-    throw new Error('Failed to update league admin settings.', {
-      cause: error,
-    });
+    throw new Error(
+      error instanceof Error
+        ? error.message
+        : 'Failed to update league admin settings.',
+      { cause: error }
+    );
   }
 }
 
 async function verifyAdminUser(adminUserId: string) {
   const rows = await db.select().from(users).where(eq(users.id, adminUserId));
   if (rows.length === 0 || rows[0].role !== 'admin') {
-    throw new Error(
-      'Commissioner permission required: switch to a Commissioner account to perform this action.'
-    );
+    throw new Error('Commissioner permission required to perform this action.');
   }
   return rows[0];
 }
@@ -803,7 +1020,7 @@ export async function adminUpdateTeam(params: {
     }
 
     if (Object.keys(updatePayload).length === 0) {
-      return targetRows[0];
+      return sanitizeUser(targetRows[0]);
     }
 
     const updated = await db
@@ -812,7 +1029,7 @@ export async function adminUpdateTeam(params: {
       .where(eq(users.id, params.targetUserId))
       .returning();
 
-    return updated[0];
+    return sanitizeUser(updated[0]);
   } catch (error) {
     throw new Error(
       error instanceof Error ? error.message : 'Failed to update team profile.',
@@ -992,34 +1209,6 @@ export async function resetExclusiveDraft(adminUserId: string) {
       error instanceof Error
         ? error.message
         : 'Failed to reset initial draft.',
-      { cause: error }
-    );
-  }
-}
-
-export async function claimAdminWithPasscode(params: {
-  targetUserId: string;
-  passcode: string;
-}) {
-  try {
-    const cleanCode = params.passcode.trim().toUpperCase();
-    if (cleanCode !== 'COMMISH-2026' && cleanCode !== 'PITBOX-ADMIN') {
-      throw new Error('Invalid Commissioner passcode.');
-    }
-    const updated = await db
-      .update(users)
-      .set({ role: 'admin' })
-      .where(eq(users.id, params.targetUserId))
-      .returning();
-    if (updated.length === 0) {
-      throw new Error('Manager not found.');
-    }
-    return updated[0];
-  } catch (error) {
-    throw new Error(
-      error instanceof Error
-        ? error.message
-        : 'Failed to claim Commissioner role.',
       { cause: error }
     );
   }

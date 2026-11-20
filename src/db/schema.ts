@@ -9,17 +9,26 @@ import {
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
-// 1. USERS TABLE (Linked with Firebase Auth uid)
+// 1. USERS TABLE (Authenticated Accounts)
 export const users = pgTable('users', {
   id: text('id').primaryKey(),
   uid: text('uid').notNull().unique(),
   email: text('email').notNull(),
+  passwordHash: text('password_hash'),
   name: text('name').notNull(),
   avatar: text('avatar').notNull().default('PB'),
   lastYearRank: integer('last_year_rank').notNull().default(1),
   role: text('role').notNull().default('member'), // 'admin' | 'member'
-  cumulativePriorPoints: integer('cumulative_prior_points').notNull().default(2410),
+  cumulativePriorPoints: integer('cumulative_prior_points').notNull().default(0),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+});
+
+// 1b. LEAGUE SETTINGS TABLE (Name & Invite Code managed by Commissioner)
+export const leagueSettings = pgTable('league_settings', {
+  id: text('id').primaryKey(), // canonical row 'default'
+  leagueName: text('league_name').notNull().default('Pit Box Fantasy League'),
+  inviteCode: text('invite_code').notNull().default('PITBOX-2026'),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 });
 
 // 2. SERIES & LEAGUE CONFIG TABLE

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Trophy,
   Calendar,
@@ -26,13 +26,6 @@ import {
   Shuffle,
   Play,
 } from 'lucide-react';
-import {
-  signInWithPopup,
-  signOut,
-  onAuthStateChanged,
-  User,
-} from 'firebase/auth';
-import { auth, googleAuthProvider } from './lib/firebase.ts';
 import {
   resolveSeasonSlotScore,
   ComputedRaceResult,
@@ -178,6 +171,10 @@ interface DbRaceResult {
 }
 
 interface LeagueStatePayload {
+  leagueSettings?: {
+    leagueName: string;
+    inviteCode: string | null;
+  };
   users: DbUser[];
   seriesConfig: DbSeriesConfig[];
   drivers: DbDriver[];
@@ -187,24 +184,33 @@ interface LeagueStatePayload {
   raceDriverResults: DbRaceResult[];
 }
 
-const EXTRA_USAGE_HISTORY: Record<string, string[]> = {
-  c3: ['Martinsville'],
-  cn1: ['Talladega', 'Dover'],
-  o_bw1: ['Darlington'],
-  o1: ['Watkins Glen', 'Road America'],
-  t2: ['Bristol Spring', 'Martinsville', 'North Wilkesboro', 'Charlotte'],
-  t_bw1: ['Atlanta', 'Las Vegas'],
-};
-
 export default function App() {
   const [activeTab, setActiveTab] = useState<
     'picks' | 'standings' | 'bank' | 'draft' | 'admin'
   >('picks');
 
-  // Firebase Auth & Active Manager Switcher
-  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
-  const idTokenRef = useRef<string | null>(null);
-  const [activeManagerId, setActiveManagerId] = useState<string>('u1');
+  // Authenticated Session & Homescreen Auth State
+  const [currentUser, setCurrentUser] = useState<DbUser | null>(null);
+  const [authChecked, setAuthChecked] = useState<boolean>(false);
+  const [authBootstrap, setAuthBootstrap] = useState<{
+    hasAdmin: boolean;
+    memberCount: number;
+    leagueName: string;
+  }>({
+    hasAdmin: true,
+    memberCount: 0,
+    leagueName: 'Pit Box Fantasy League',
+  });
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authName, setAuthName] = useState<string>('');
+  const [authEmail, setAuthEmail] = useState<string>('');
+  const [authPassword, setAuthPassword] = useState<string>('');
+  const [authInviteCode, setAuthInviteCode] = useState<string>('');
+  const [authLeagueName, setAuthLeagueName] = useState<string>('');
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authSubmitting, setAuthSubmitting] = useState<boolean>(false);
+
+  const activeManagerId = currentUser?.id || '';
 
   // League State from PostgreSQL Backend
   const [leagueState, setLeagueState] = useState<LeagueStatePayload | null>(
@@ -228,15 +234,18 @@ export default function App() {
   const [showJoinModal, setShowJoinModal] = useState<boolean>(false);
   const [newTeamName, setNewTeamName] = useState<string>('');
   const [newTeamEmail, setNewTeamEmail] = useState<string>('');
-  const [inviteCodeInput, setInviteCodeInput] =
-    useState<string>('PITBOX-2026');
+  const [newTeamPassword, setNewTeamPassword] = useState<string>('');
   const [isJoining, setIsJoining] = useState<boolean>(false);
   const [copiedInvite, setCopiedInvite] = useState<boolean>(false);
+
+  // Commissioner League Settings Draft Inputs
+  const [editLeagueName, setEditLeagueName] = useState<string>('');
+  const [editInviteCode, setEditInviteCode] = useState<string>('');
 
   // Expanded cards in Standings / League Board
   const [expandedMemberIds, setExpandedMemberIds] = useState<
     Record<string, boolean>
-  >({ u1: true, u2: true });
+  >({});
 
   // Sync & Simulation State
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
@@ -264,126 +273,238 @@ export default function App() {
   >('cup_prev_chase');
 
   // Commissioner Team Control State
-  const [adminTargetUserId, setAdminTargetUserId] = useState<string>('u1');
+  const [adminTargetUserId, setAdminTargetUserId] = useState<string>('');
   const [adminEditName, setAdminEditName] = useState<string>('');
   const [adminEditRank, setAdminEditRank] = useState<number>(1);
-  const [adminEditPriorPts, setAdminEditPriorPts] = useState<number>(2400);
+  const [adminEditPriorPts, setAdminEditPriorPts] = useState<number>(0);
   const [adminForceReassign, setAdminForceReassign] = useState<boolean>(true);
-  const [adminPasscode, setAdminPasscode] = useState<string>('');
   const [adminAnchorDrafts, setAdminAnchorDrafts] = useState<
     Record<string, string>
   >({});
 
-  useEffect(() => {
-    let mounted = true;
-    async function loadInitial() {
-      try {
-        const res = await fetch('/api/league-state');
-        const data = await res.json();
-        if (mounted && data.ok && data.state) {
-          setLeagueState(data.state);
-          const oreillysResults: DbRaceResult[] =
-            data.state.raceDriverResults || [];
-          const zilischPresent = oreillysResults.some(
-            (r) =>
-              r.raceId === 'r_oreillys_bristol' && r.nascarDriverId === 5001
-          );
-          setSimulateZilischInjury(!zilischPresent);
-        }
-      } catch (err) {
-        console.error('Failed to load initial state:', err);
-      } finally {
-        if (mounted) setIsLoading(false);
+  const refreshBootstrapInfo = async () => {
+    try {
+      const res = await fetch('/api/auth/me', { credentials: 'same-origin' });
+      const data = await res.json();
+      if (data.ok && !data.authenticated) {
+        setAuthBootstrap({
+          hasAdmin: Boolean(data.hasAdmin),
+          memberCount: Number(data.memberCount || 0),
+          leagueName: data.leagueName || 'Pit Box Fantasy League',
+        });
+        setAuthMode(data.hasAdmin ? 'login' : 'register');
+      }
+    } catch {
+      // Ignore network hiccup on bootstrap refresh
+    }
+  };
+
+  const applyLeagueState = (state: LeagueStatePayload, activeUid?: string) => {
+    setLeagueState(state);
+    const oreillysResults: DbRaceResult[] = state.raceDriverResults || [];
+    const zilischPresent = oreillysResults.some(
+      (r) => r.raceId === 'r_oreillys_bristol' && r.nascarDriverId === 5001
+    );
+    setSimulateZilischInjury(!zilischPresent);
+    if (activeUid) {
+      const refreshedMe = (state.users || []).find((u) => u.id === activeUid);
+      if (refreshedMe) {
+        setCurrentUser(refreshedMe);
       }
     }
-    loadInitial();
+  };
+
+  useEffect(() => {
+    let mounted = true;
+    async function bootstrapSession() {
+      try {
+        const authRes = await fetch('/api/auth/me', {
+          credentials: 'same-origin',
+        });
+        const authData = await authRes.json();
+        if (!mounted) return;
+
+        if (authData.ok && authData.authenticated && authData.user) {
+          setCurrentUser(authData.user);
+          const stateRes = await fetch('/api/league-state', {
+            credentials: 'same-origin',
+          });
+          const stateData = await stateRes.json();
+          if (mounted && stateRes.ok && stateData.ok && stateData.state) {
+            applyLeagueState(stateData.state, authData.user.id);
+          } else if (mounted && stateRes.status === 401) {
+            setCurrentUser(null);
+          }
+        } else {
+          setCurrentUser(null);
+          setAuthBootstrap({
+            hasAdmin: Boolean(authData.hasAdmin),
+            memberCount: Number(authData.memberCount || 0),
+            leagueName: authData.leagueName || 'Pit Box Fantasy League',
+          });
+          setAuthMode(authData.hasAdmin ? 'login' : 'register');
+        }
+      } catch (err) {
+        console.error('Failed to check auth/session state:', err);
+      } finally {
+        if (mounted) {
+          setAuthChecked(true);
+          setIsLoading(false);
+        }
+      }
+    }
+    bootstrapSession();
     return () => {
       mounted = false;
     };
   }, []);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      setFirebaseUser(user);
-      if (user) {
-        try {
-          const token = await user.getIdToken();
-          idTokenRef.current = token;
-          const res = await fetch('/api/auth/sync', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${token}`,
-            },
-          });
-          const data = await res.json();
-          if (data.ok && data.state) {
-            setLeagueState(data.state);
-            if (data.user?.id) {
-              setActiveManagerId(data.user.id);
-            }
-          }
-        } catch (err) {
-          console.error('Auth sync error:', err);
-        }
-      } else {
-        idTokenRef.current = null;
+    if (leagueState?.leagueSettings) {
+      setEditLeagueName(leagueState.leagueSettings.leagueName || '');
+      if (leagueState.leagueSettings.inviteCode) {
+        setEditInviteCode(leagueState.leagueSettings.inviteCode);
       }
-    });
-    return () => unsubscribe();
-  }, []);
-
-  const handleGoogleSignIn = async () => {
-    try {
-      await signInWithPopup(auth, googleAuthProvider);
-      setShowJoinModal(false);
-      setStatusBanner({
-        type: 'success',
-        text: 'Signed in with Google and linked to your team!',
-      });
-    } catch (error: any) {
-      setStatusBanner({
-        type: 'error',
-        text: error?.message || 'Sign-in cancelled.',
-      });
     }
+  }, [leagueState?.leagueSettings]);
+
+  const handleUnauthorizedResponse = async () => {
+    setCurrentUser(null);
+    setLeagueState(null);
+    await refreshBootstrapInfo();
   };
 
-  const handleJoinLeagueSubmit = async (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newTeamName.trim()) return;
-    setIsJoining(true);
+    setAuthError(null);
+    setAuthSubmitting(true);
     try {
-      const res = await fetch('/api/league/join', {
+      const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
         body: JSON.stringify({
-          name: newTeamName.trim(),
-          email: newTeamEmail.trim() || undefined,
-          inviteCode: inviteCodeInput.trim(),
+          email: authEmail.trim(),
+          password: authPassword,
         }),
       });
       const data = await res.json();
-      if (data.ok && data.state && data.user) {
-        setLeagueState(data.state);
-        setActiveManagerId(data.user.id);
+      if (data.ok && data.user && data.state) {
+        setCurrentUser(data.user);
+        applyLeagueState(data.state, data.user.id);
+        setAuthPassword('');
+        setActiveTab('picks');
+        setStatusBanner({
+          type: 'success',
+          text: `Welcome back, ${data.user.name}!`,
+        });
+      } else {
+        setAuthError(data.error || 'Invalid email or password.');
+      }
+    } catch (err: any) {
+      setAuthError(err?.message || 'Sign-in failed. Please try again.');
+    } finally {
+      setAuthSubmitting(false);
+    }
+  };
+
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError(null);
+    setAuthSubmitting(true);
+    try {
+      const res = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          name: authName.trim(),
+          email: authEmail.trim(),
+          password: authPassword,
+          inviteCode: authInviteCode.trim() || undefined,
+          leagueName: authLeagueName.trim() || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (data.ok && data.user && data.state) {
+        setCurrentUser(data.user);
+        applyLeagueState(data.state, data.user.id);
+        setAuthPassword('');
+        setActiveTab(data.user.role === 'admin' ? 'admin' : 'picks');
+        setStatusBanner({
+          type: 'success',
+          text:
+            data.user.role === 'admin'
+              ? `League created! ${data.user.name} is the League Commissioner.`
+              : `Welcome to the league, ${data.user.name}!`,
+        });
+      } else {
+        setAuthError(data.error || 'Could not create account.');
+      }
+    } catch (err: any) {
+      setAuthError(err?.message || 'Account creation failed.');
+    } finally {
+      setAuthSubmitting(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'same-origin',
+      });
+    } catch {
+      // Proceed with local sign-out state cleanup even on network failure
+    }
+    setCurrentUser(null);
+    setLeagueState(null);
+    setStatusBanner(null);
+    setActiveTab('picks');
+    await refreshBootstrapInfo();
+  };
+
+  const handleAdminCreateMemberSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newTeamName.trim() || !newTeamEmail.trim() || !newTeamPassword) return;
+    setIsJoining(true);
+    try {
+      const res = await fetch('/api/admin/team', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          action: 'create_member',
+          name: newTeamName.trim(),
+          email: newTeamEmail.trim(),
+          password: newTeamPassword,
+        }),
+      });
+      if (res.status === 401) {
+        await handleUnauthorizedResponse();
+        return;
+      }
+      const data = await res.json();
+      if (data.ok && data.state) {
+        applyLeagueState(data.state, currentUser?.id);
         setNewTeamName('');
         setNewTeamEmail('');
+        setNewTeamPassword('');
         setShowJoinModal(false);
         setStatusBanner({
           type: 'success',
-          text: `Welcome ${data.user.name}! Your team and starter lineup are now active.`,
+          text: `Added member ${newTeamName.trim()} to the league.`,
         });
       } else {
         setStatusBanner({
           type: 'error',
-          text: data.error || 'Could not join league.',
+          text: data.error || 'Could not add league member.',
         });
       }
     } catch (err: any) {
       setStatusBanner({
         type: 'error',
-        text: err?.message || 'Failed to join league.',
+        text: err?.message || 'Failed to create member.',
       });
     } finally {
       setIsJoining(false);
@@ -391,7 +512,9 @@ export default function App() {
   };
 
   const handleCopyInvite = () => {
-    navigator.clipboard?.writeText('PITBOX-2026').catch(() => {});
+    const code = leagueState?.leagueSettings?.inviteCode;
+    if (!code) return;
+    navigator.clipboard?.writeText(code).catch(() => {});
     setCopiedInvite(true);
     setTimeout(() => setCopiedInvite(false), 2000);
   };
@@ -467,10 +590,6 @@ export default function App() {
       )
       .map((p) => p.trackLabel || 'Prior Race');
 
-    const extraTracks = EXTRA_USAGE_HISTORY[driverId] || [];
-    const combinedTracks =
-      dbHistorical.length > 0 ? dbHistorical : extraTracks;
-
     const seriesCfg = leagueState?.seriesConfig.find((s) => s.id === seriesId);
     const maxUses = seriesCfg?.maxWeeklyUsesPerDriver ?? 5;
 
@@ -484,10 +603,10 @@ export default function App() {
     );
 
     return {
-      pastTracks: combinedTracks,
-      used: combinedTracks.length,
+      pastTracks: dbHistorical,
+      used: dbHistorical.length,
       isCurrentlyPicked,
-      remaining: Math.max(0, maxUses - combinedTracks.length),
+      remaining: Math.max(0, maxUses - dbHistorical.length),
       maxUses,
     };
   };
@@ -524,6 +643,17 @@ export default function App() {
               p.raceId === raceObj.id &&
               !p.isHistorical
           );
+          if (pickRow?.driverId === '__HIDDEN__') {
+            return {
+              points: 0,
+              driverName: 'Pick Locked In',
+              teamName: 'Hidden until Green Flag',
+              isOwnerPts: false,
+              carNumber: '?',
+              driverId: '__HIDDEN__',
+              finishPos: null as number | null,
+            };
+          }
           const driverObj = pickRow ? getDriverObj(pickRow.driverId) : undefined;
           if (!driverObj) {
             return {
@@ -709,15 +839,20 @@ export default function App() {
       const res = await fetch('/api/nascar-sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
         body: JSON.stringify({
           year: 2025,
           firstPlacePoints,
           simulateZilischInjury,
         }),
       });
+      if (res.status === 401) {
+        await handleUnauthorizedResponse();
+        return;
+      }
       const data = await res.json();
       if (data.ok) {
-        if (data.state) setLeagueState(data.state);
+        if (data.state) applyLeagueState(data.state, currentUser?.id);
         if (data.schedules_found) setCdnSchedulesSummary(data.schedules_found);
         const nowStr = new Date().toLocaleTimeString([], {
           hour: '2-digit',
@@ -749,16 +884,20 @@ export default function App() {
       const res = await fetch('/api/weekly-pick', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
         body: JSON.stringify({
-          userId: activeManagerId,
           raceId: raceObj.id,
           seriesId,
           driverId,
         }),
       });
+      if (res.status === 401) {
+        await handleUnauthorizedResponse();
+        return;
+      }
       const data = await res.json();
       if (data.ok && data.state) {
-        setLeagueState(data.state);
+        applyLeagueState(data.state, currentUser?.id);
         setSwapWeeklyDrawerSeries(null);
         setStatusBanner({
           type: 'success',
@@ -779,6 +918,8 @@ export default function App() {
   };
 
   const handleUpdateAdminSetting = async (patch: {
+    leagueName?: string;
+    inviteCode?: string;
     firstPlacePoints?: 55 | 40;
     useCarAnchorFallback?: boolean;
     chaseActive?: boolean;
@@ -793,6 +934,7 @@ export default function App() {
       const res = await fetch('/api/admin/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
         body: JSON.stringify({
           firstPlacePoints,
           useCarAnchorFallback,
@@ -801,12 +943,31 @@ export default function App() {
           ...patch,
         }),
       });
+      if (res.status === 401) {
+        await handleUnauthorizedResponse();
+        return;
+      }
       const data = await res.json();
       if (data.ok && data.state) {
-        setLeagueState(data.state);
+        applyLeagueState(data.state, currentUser?.id);
+        if (patch.leagueName !== undefined || patch.inviteCode !== undefined) {
+          setStatusBanner({
+            type: 'success',
+            text: 'League name & invite code saved.',
+          });
+        }
+      } else {
+        setStatusBanner({
+          type: 'error',
+          text: data.error || 'Failed to update setting.',
+        });
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to update setting:', err);
+      setStatusBanner({
+        type: 'error',
+        text: err?.message || 'Failed to update setting.',
+      });
     }
   };
 
@@ -820,17 +981,21 @@ export default function App() {
       const res = await fetch('/api/season-roster', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
         body: JSON.stringify({
-          userId: activeManagerId,
           seriesId,
           slotType,
           driverId,
           fallbackCarNumber,
         }),
       });
+      if (res.status === 401) {
+        await handleUnauthorizedResponse();
+        return;
+      }
       const data = await res.json();
       if (data.ok && data.state) {
-        setLeagueState(data.state);
+        applyLeagueState(data.state, currentUser?.id);
         setSwapSeasonDrawerSlot(null);
         setStatusBanner({
           type: 'success',
@@ -992,14 +1157,16 @@ export default function App() {
       const res = await fetch('/api/admin/team', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          adminUserId: activeManagerId,
-          ...payload,
-        }),
+        credentials: 'same-origin',
+        body: JSON.stringify(payload),
       });
+      if (res.status === 401) {
+        await handleUnauthorizedResponse();
+        return;
+      }
       const data = await res.json();
       if (data.ok && data.state) {
-        setLeagueState(data.state);
+        applyLeagueState(data.state, currentUser?.id);
         setStatusBanner({ type: 'success', text: successMsg });
       } else {
         setStatusBanner({
@@ -1023,14 +1190,16 @@ export default function App() {
       const res = await fetch('/api/draft/action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          adminUserId: activeManagerId,
-          ...payload,
-        }),
+        credentials: 'same-origin',
+        body: JSON.stringify(payload),
       });
+      if (res.status === 401) {
+        await handleUnauthorizedResponse();
+        return;
+      }
       const data = await res.json();
       if (data.ok && data.state) {
-        setLeagueState(data.state);
+        applyLeagueState(data.state, currentUser?.id);
         setStatusBanner({ type: 'success', text: successMsg });
       } else {
         setStatusBanner({
@@ -1091,7 +1260,7 @@ export default function App() {
     );
   };
 
-  if (isLoading) {
+  if (!authChecked || (currentUser && isLoading)) {
     return (
       <div className="min-h-screen bg-[#090A0F] text-white flex items-center justify-center p-4">
         <div className="max-w-sm w-full bg-[#131620] border border-slate-800 rounded-2xl p-4 space-y-3">
@@ -1103,11 +1272,252 @@ export default function App() {
     );
   }
 
+  // STRICT AUTH GATE: Unauthenticated visitors see ONLY the Login / Sign-Up Homescreen
+  if (!currentUser) {
+    const isFirstSetup = !authBootstrap.hasAdmin;
+    return (
+      <div className="min-h-screen bg-[#090A0F] text-white flex flex-col items-center justify-center p-4 selection:bg-[#FFD100] selection:text-black">
+        <div className="w-full max-w-md bg-[#131722] border border-slate-800 rounded-2xl overflow-hidden shadow-2xl shadow-black/70">
+          {/* NASCAR 3-Color Telemetry Stripe */}
+          <div className="h-1.5 w-full flex">
+            <div className="flex-1 bg-[#FFD100]" />
+            <div className="flex-1 bg-[#E4002B]" />
+            <div className="flex-1 bg-[#1D63FF]" />
+          </div>
+
+          <div className="p-6 space-y-5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="flex items-center -space-x-1">
+                  <span className="w-2.5 h-6 bg-[#FFD100] skew-x-[-14deg] rounded-xs" />
+                  <span className="w-2.5 h-6 bg-[#E4002B] skew-x-[-14deg] rounded-xs" />
+                  <span className="w-2.5 h-6 bg-[#1D63FF] skew-x-[-14deg] rounded-xs" />
+                </div>
+                <div>
+                  <h1 className="font-display font-bold tracking-wider text-2xl text-white leading-none">
+                    PIT BOX FANTASY
+                  </h1>
+                  <p className="text-xs text-slate-400 mt-1">
+                    {authBootstrap.leagueName}
+                  </p>
+                </div>
+              </div>
+              <span className="px-2 py-1 rounded-lg bg-[#090A0F] border border-slate-800 font-mono text-[10px] text-slate-400">
+                {isFirstSetup
+                  ? 'NEW LEAGUE'
+                  : `${authBootstrap.memberCount} TEAMS`}
+              </span>
+            </div>
+
+            {/* Sign In / Create Account Mode Switch */}
+            <div className="grid grid-cols-2 gap-1.5 p-1 bg-[#090A0F] border border-slate-800 rounded-xl">
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('login');
+                  setAuthError(null);
+                }}
+                className={`min-h-[38px] rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                  authMode === 'login'
+                    ? 'bg-[#FFD100] text-black'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                Sign In
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('register');
+                  setAuthError(null);
+                }}
+                className={`min-h-[38px] rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                  authMode === 'register'
+                    ? 'bg-[#FFD100] text-black'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                {isFirstSetup ? 'Setup League' : 'Create Account'}
+              </button>
+            </div>
+
+            {authError && (
+              <div className="px-3 py-2.5 rounded-xl bg-[#E4002B]/15 border border-[#E4002B]/40 text-xs text-red-200 flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 text-[#FF6B81]" />
+                <span>{authError}</span>
+              </div>
+            )}
+
+            {authMode === 'login' ? (
+              <form onSubmit={handleLoginSubmit} className="space-y-3.5">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">
+                    Email
+                  </label>
+                  <input
+                    type="email"
+                    required
+                    autoComplete="email"
+                    placeholder="you@example.com"
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    className="w-full min-h-[42px] bg-[#090A0F] border border-slate-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-[#FFD100]"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">
+                    Password
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    autoComplete="current-password"
+                    placeholder="Enter your password"
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    className="w-full min-h-[42px] bg-[#090A0F] border border-slate-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-[#FFD100]"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={authSubmitting}
+                  className="w-full min-h-[44px] rounded-xl bg-[#FFD100] hover:bg-[#ffe033] text-black font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 cursor-pointer transition-colors disabled:opacity-60"
+                >
+                  <LogIn className="w-4 h-4" />
+                  <span>{authSubmitting ? 'Signing In...' : 'Sign In'}</span>
+                </button>
+              </form>
+            ) : (
+              <form onSubmit={handleRegisterSubmit} className="space-y-3">
+                {isFirstSetup && (
+                  <div className="p-3 rounded-xl bg-[#FFD100]/10 border border-[#FFD100]/40 text-xs text-amber-100 leading-relaxed">
+                    <span className="font-bold text-[#FFD100]">
+                      First-Time League Setup:
+                    </span>{' '}
+                    The first account created automatically becomes the{' '}
+                    <strong className="text-white">League Commissioner</strong>.
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">
+                    Manager or Team Name
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    minLength={2}
+                    placeholder="e.g., Intimidator Racing"
+                    value={authName}
+                    onChange={(e) => setAuthName(e.target.value)}
+                    className="w-full min-h-[42px] bg-[#090A0F] border border-slate-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-[#FFD100]"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">
+                    Email
+                  </label>
+                  <input
+                    type="email"
+                    required
+                    autoComplete="email"
+                    placeholder="you@example.com"
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    className="w-full min-h-[42px] bg-[#090A0F] border border-slate-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-[#FFD100]"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">
+                    Password (min 6 characters)
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    minLength={6}
+                    autoComplete="new-password"
+                    placeholder="Create a strong password"
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    className="w-full min-h-[42px] bg-[#090A0F] border border-slate-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-[#FFD100]"
+                  />
+                </div>
+
+                {isFirstSetup ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                        League Name (Optional)
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="Pit Box Fantasy League"
+                        value={authLeagueName}
+                        onChange={(e) => setAuthLeagueName(e.target.value)}
+                        className="w-full min-h-[40px] bg-[#090A0F] border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-white focus:outline-none focus:border-[#FFD100]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                        Friend Invite Code
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="PITBOX-2026"
+                        value={authInviteCode}
+                        onChange={(e) => setAuthInviteCode(e.target.value)}
+                        className="w-full min-h-[40px] bg-[#090A0F] border border-slate-700 rounded-xl px-3 py-1.5 text-xs font-mono text-[#FFD100] focus:outline-none focus:border-[#FFD100]"
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">
+                      League Invite Code
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="Ask your Commissioner"
+                      value={authInviteCode}
+                      onChange={(e) => setAuthInviteCode(e.target.value)}
+                      className="w-full min-h-[42px] bg-[#090A0F] border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono font-bold text-[#FFD100] focus:outline-none focus:border-[#FFD100]"
+                    />
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={authSubmitting}
+                  className="w-full min-h-[44px] rounded-xl bg-[#FFD100] hover:bg-[#ffe033] text-black font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 cursor-pointer transition-colors disabled:opacity-60"
+                >
+                  <UserPlus className="w-4 h-4" />
+                  <span>
+                    {authSubmitting
+                      ? 'Creating Account...'
+                      : isFirstSetup
+                      ? 'Create Commissioner Account'
+                      : 'Create Account & Join League'}
+                  </span>
+                </button>
+              </form>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const activeUserRow =
-    leaderboard.find((u) => u.id === activeManagerId) || leaderboard[0];
-  const activeRank =
-    leaderboard.findIndex((u) => u.id === activeUserRow?.id) + 1;
-  const isCurrentUserAdmin = activeUserRow?.role === 'admin';
+    leaderboard.find((u) => u.id === currentUser.id) || leaderboard[0];
+  const activeRank = activeUserRow
+    ? leaderboard.findIndex((u) => u.id === activeUserRow.id) + 1
+    : 1;
+  const isCurrentUserAdmin = currentUser.role === 'admin';
   const primaryAdmin =
     (leagueState?.users || []).find((u) => u.role === 'admin') ||
     leagueState?.users?.[0];
@@ -1137,32 +1547,37 @@ export default function App() {
             </span>
           </div>
           <span className="font-mono text-[11px] text-slate-400">
-            {leagueState?.users.length || 6}-TEAM
+            {leagueState?.users.length || 1}-TEAM
           </span>
         </div>
 
-        {/* Active Team Switcher / Sign Up */}
+        {/* Signed-In Manager Card (Strict Session Identity — No Team Impersonation) */}
         <div className="p-3 border-b border-slate-800/80 space-y-2 bg-[#141824]">
           <div className="flex items-center justify-between text-[11px] text-slate-400">
-            <span>VIEWING TEAM AS</span>
-            <button
-              onClick={() => setShowJoinModal(true)}
-              className="text-[#FFD100] hover:underline font-semibold flex items-center gap-1 cursor-pointer"
+            <span>SIGNED IN AS</span>
+            <span
+              className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-bold ${
+                isCurrentUserAdmin
+                  ? 'bg-[#FFD100]/20 text-[#FFD100]'
+                  : 'bg-slate-800 text-slate-300'
+              }`}
             >
-              <UserPlus className="w-3 h-3" /> + Join / Sign Up
-            </button>
+              {isCurrentUserAdmin ? 'COMMISH' : 'MANAGER'}
+            </span>
           </div>
-          <select
-            value={activeManagerId}
-            onChange={(e) => setActiveManagerId(e.target.value)}
-            className="w-full min-h-[38px] bg-[#090A0F] border border-slate-700/80 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-white"
-          >
-            {(leagueState?.users || []).map((u) => (
-              <option key={u.id} value={u.id}>
-                {u.name} {u.role === 'admin' ? '(Commish)' : ''}
-              </option>
-            ))}
-          </select>
+          <div className="flex items-center gap-2.5 bg-[#090A0F] border border-slate-800 rounded-lg px-2.5 py-2">
+            <div className="w-7 h-7 rounded bg-[#1E2436] font-mono text-xs font-bold text-[#FFD100] flex items-center justify-center shrink-0">
+              {activeUserRow?.avatar || currentUser.avatar}
+            </div>
+            <div className="min-w-0">
+              <div className="text-xs font-bold text-white truncate">
+                {activeUserRow?.name || currentUser.name}
+              </div>
+              <div className="text-[10px] text-slate-400 truncate">
+                {currentUser.email}
+              </div>
+            </div>
+          </div>
         </div>
 
         <nav className="flex-1 p-2.5 space-y-1">
@@ -1193,38 +1608,30 @@ export default function App() {
         </nav>
 
         <div className="p-3 m-2.5 rounded-xl bg-[#141824] border border-slate-800/90 space-y-2.5">
-          <div className="flex items-center justify-between text-[11px] text-slate-400">
-            <span>Invite Code</span>
-            <button
-              onClick={handleCopyInvite}
-              className="font-mono font-bold text-[#FFD100] hover:underline flex items-center gap-1 cursor-pointer"
-            >
-              <span>PITBOX-2026</span>
-              <Copy className="w-3 h-3" />
-            </button>
-          </div>
-
-          {firebaseUser ? (
-            <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-800">
-              <span className="text-xs font-medium text-slate-200 truncate">
-                {firebaseUser.displayName || firebaseUser.email}
-              </span>
+          {isCurrentUserAdmin && leagueState?.leagueSettings?.inviteCode && (
+            <div className="flex items-center justify-between text-[11px] text-slate-400 pb-2 border-b border-slate-800">
+              <span>Invite Code</span>
               <button
-                onClick={() => signOut(auth)}
-                className="p-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-white cursor-pointer"
+                onClick={handleCopyInvite}
+                className="font-mono font-bold text-[#FFD100] hover:underline flex items-center gap-1 cursor-pointer"
               >
-                <LogOut className="w-3.5 h-3.5" />
+                <span>
+                  {copiedInvite
+                    ? 'Copied!'
+                    : leagueState.leagueSettings.inviteCode}
+                </span>
+                <Copy className="w-3 h-3" />
               </button>
             </div>
-          ) : (
-            <button
-              onClick={() => setShowJoinModal(true)}
-              className="w-full min-h-[38px] px-3 py-1.5 rounded-lg bg-[#FFD100] hover:bg-[#ffe033] text-black text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
-            >
-              <UserPlus className="w-3.5 h-3.5" />
-              <span>Claim Team / Sign Up</span>
-            </button>
           )}
+
+          <button
+            onClick={handleLogout}
+            className="w-full min-h-[38px] px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+          >
+            <LogOut className="w-3.5 h-3.5 text-[#FFD100]" />
+            <span>Sign Out</span>
+          </button>
         </div>
       </aside>
 
@@ -1291,32 +1698,28 @@ export default function App() {
           </div>
         </header>
 
-        {/* SLEEPER-STYLE COMPACT TEAM SUMMARY & ONBOARDING BAR */}
+        {/* SLEEPER-STYLE COMPACT TEAM SUMMARY BAR */}
         <div className="bg-[#11141E] border-b border-slate-800/90 px-3 py-2 md:px-6">
           <div className="max-w-5xl mx-auto flex flex-wrap items-center justify-between gap-2">
-            {/* Active Team Selector + Rank & Live Score */}
+            {/* Authenticated Team Rank & Live Score */}
             <div className="flex items-center gap-2.5 min-w-0">
               <div className="w-8 h-8 rounded-lg bg-[#1D2233] border border-slate-700 flex items-center justify-center font-mono font-bold text-xs text-[#FFD100] shrink-0">
-                {activeUserRow?.avatar || 'PB'}
+                {activeUserRow?.avatar || currentUser.avatar}
               </div>
               <div className="min-w-0">
                 <div className="flex items-center gap-1.5">
-                  <select
-                    value={activeManagerId}
-                    onChange={(e) => setActiveManagerId(e.target.value)}
-                    aria-label="Switch Active Manager"
-                    className="bg-transparent text-xs md:text-sm font-bold text-white focus:outline-none cursor-pointer truncate max-w-[165px] sm:max-w-xs"
+                  <span className="text-xs md:text-sm font-bold text-white truncate max-w-[180px] sm:max-w-xs">
+                    {activeUserRow?.name || currentUser.name}
+                  </span>
+                  <span
+                    className={`px-1.5 py-0.5 rounded font-mono text-[9px] font-bold ${
+                      isCurrentUserAdmin
+                        ? 'bg-[#FFD100]/20 text-[#FFD100]'
+                        : 'bg-slate-800 text-slate-300'
+                    }`}
                   >
-                    {(leagueState?.users || []).map((u) => (
-                      <option
-                        key={u.id}
-                        value={u.id}
-                        className="bg-[#11141E] text-white"
-                      >
-                        {u.name} {u.role === 'admin' ? '(Commish)' : ''}
-                      </option>
-                    ))}
-                  </select>
+                    {isCurrentUserAdmin ? 'COMMISH' : 'MANAGER'}
+                  </span>
                 </div>
                 <div className="text-[11px] text-slate-400 font-mono">
                   Rank #{activeRank} · Wknd +{activeUserRow?.breakdown.weekendTotal || 0} · Total{' '}
@@ -1325,29 +1728,14 @@ export default function App() {
               </div>
             </div>
 
-            {/* Join / Sign Up & Quick Toggles */}
+            {/* Sign Out Action (Accessible on Mobile & Desktop) */}
             <div className="flex items-center gap-1.5">
               <button
-                onClick={() => setShowJoinModal(true)}
+                onClick={handleLogout}
                 className="min-h-[34px] px-2.5 py-1 rounded-lg bg-[#1D2233] hover:bg-slate-700 border border-slate-700 text-[11px] font-semibold text-white flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
               >
-                <UserPlus className="w-3 h-3 text-[#FFD100]" />
-                <span>Join / Add Player</span>
-              </button>
-
-              <button
-                onClick={() =>
-                  handleUpdateAdminSetting({
-                    simulateZilischInjury: !simulateZilischInjury,
-                  })
-                }
-                className={`min-h-[34px] px-2.5 py-1 rounded-lg text-[11px] font-semibold border cursor-pointer whitespace-nowrap shrink-0 ${
-                  simulateZilischInjury
-                    ? 'bg-[#E4002B]/20 text-[#FF6B81] border-[#E4002B]/50'
-                    : 'bg-[#161924] text-slate-400 border-slate-800'
-                }`}
-              >
-                #88 Sub: {simulateZilischInjury ? 'ON' : 'OFF'}
+                <LogOut className="w-3 h-3 text-[#FFD100]" />
+                <span>Sign Out</span>
               </button>
             </div>
           </div>
@@ -1423,7 +1811,7 @@ export default function App() {
                       const locked = Boolean(
                         weekendRacesBySeries[sId]?.isLockedRevealed
                       );
-                      return (
+                      return isCurrentUserAdmin ? (
                         <button
                           key={sId}
                           onClick={() =>
@@ -1445,6 +1833,23 @@ export default function App() {
                           )}
                           <span>{SERIES_META[sId].slotCode}</span>
                         </button>
+                      ) : (
+                        <span
+                          key={sId}
+                          title={locked ? 'Race started — picks revealed' : 'Blind pick — open until Green Flag'}
+                          className={`px-2 py-1 rounded text-[10px] font-mono font-bold border flex items-center gap-1 ${
+                            locked
+                              ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
+                              : 'bg-slate-800/90 text-slate-300 border-slate-700'
+                          }`}
+                        >
+                          {locked ? (
+                            <Unlock className="w-2.5 h-2.5" />
+                          ) : (
+                            <Lock className="w-2.5 h-2.5" />
+                          )}
+                          <span>{SERIES_META[sId].slotCode}</span>
+                        </span>
                       );
                     })}
                   </div>
@@ -1483,16 +1888,18 @@ export default function App() {
                               No {meta.shortName} race scheduled this weekend
                             </div>
                           </div>
-                          <button
-                            onClick={() =>
-                              handleUpdateAdminSetting({
-                                activeSeriesWeekend: { [sId]: true },
-                              })
-                            }
-                            className="px-2.5 py-1 rounded bg-slate-800 text-[11px] text-slate-200 cursor-pointer"
-                          >
-                            Enable
-                          </button>
+                          {isCurrentUserAdmin && (
+                            <button
+                              onClick={() =>
+                                handleUpdateAdminSetting({
+                                  activeSeriesWeekend: { [sId]: true },
+                                })
+                              }
+                              className="px-2.5 py-1 rounded bg-slate-800 text-[11px] text-slate-200 cursor-pointer"
+                            >
+                              Enable
+                            </button>
+                          )}
                         </div>
                       );
                     }
@@ -2149,18 +2556,10 @@ export default function App() {
                             Pre-Season Exclusive Draft Complete ({draftProgress.totalDrafted}/{draftProgress.totalNeeded} Picks)
                           </div>
                           <div className="text-xs text-slate-400">
-                            All 4 exclusive season slots are filled. Managers can swap open drivers below, or the Commissioner can restart the draft above.
+                            All 4 exclusive season slots are filled. You can swap open drivers for your team below, or the Commissioner can restart the draft above.
                           </div>
                         </div>
                       </div>
-                      {!isCurrentUserAdmin && primaryAdmin && (
-                        <button
-                          onClick={() => setActiveManagerId(primaryAdmin.id)}
-                          className="min-h-[36px] px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-bold text-[#FFD100] shrink-0 cursor-pointer"
-                        >
-                          Switch to {primaryAdmin.name} (Commish)
-                        </button>
-                      )}
                     </div>
                   );
                 }
@@ -2206,12 +2605,9 @@ export default function App() {
 
                       <div className="flex items-center gap-2">
                         {!canDraftNow && (
-                          <button
-                            onClick={() => setActiveManagerId(onClock.user.id)}
-                            className="min-h-[36px] px-3 py-1.5 rounded-xl bg-slate-800 text-xs font-bold text-[#FFD100] cursor-pointer"
-                          >
-                            Act as {onClock.user.name}
-                          </button>
+                          <span className="px-3 py-1.5 rounded-xl bg-slate-800/80 text-xs font-semibold text-slate-400">
+                            Waiting on {onClock.user.name}
+                          </span>
                         )}
                         {canDraftNow && (
                           <button
@@ -2471,141 +2867,141 @@ export default function App() {
           )}
 
           {/* ==========================================
-              TAB 5: LEAGUE HUB, ONBOARDING & COMMISSIONER CONTROLS
+              TAB 5: LEAGUE HUB & COMMISSIONER CONTROLS
           ========================================== */}
           {activeTab === 'admin' && (
             <div className="space-y-4">
-              {/* How League Managers & Members Use the App (Invite + Sign-Up Hub) */}
-              <div className="bg-[#131722] border border-slate-800/90 rounded-2xl p-4 space-y-3">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              {isCurrentUserAdmin ? (
+                <>
+                  {/* Commissioner League Settings & Invites */}
+                  <div className="bg-[#131722] border border-slate-800/90 rounded-2xl p-4 space-y-3">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-9 h-9 rounded-xl bg-[#FFD100]/15 border border-[#FFD100]/40 flex items-center justify-center shrink-0">
+                          <Crown className="w-4 h-4 text-[#FFD100]" />
+                        </div>
+                        <div>
+                          <h1 className="font-display text-2xl font-bold tracking-wide text-white">
+                            Commissioner Settings &amp; Invites
+                          </h1>
+                          <p className="text-xs text-slate-400">
+                            Manage your league name, friend invite code, or manually create member accounts.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {leagueState?.leagueSettings?.inviteCode && (
+                          <button
+                            onClick={handleCopyInvite}
+                            className="min-h-[38px] px-3 py-1.5 rounded-xl bg-[#1D2233] border border-slate-700 text-xs font-mono font-bold text-[#FFD100] flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <Copy className="w-3.5 h-3.5" />
+                            <span>
+                              {copiedInvite
+                                ? 'Copied!'
+                                : `Invite: ${leagueState.leagueSettings.inviteCode}`}
+                            </span>
+                          </button>
+                        )}
+                        <button
+                          onClick={() => setShowJoinModal(true)}
+                          className="min-h-[38px] px-3 py-1.5 rounded-xl bg-[#FFD100] text-black text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <UserPlus className="w-3.5 h-3.5" />
+                          <span>Add Member Manually</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 pt-2 border-t border-slate-800/80 items-end">
+                      <div className="sm:col-span-5">
+                        <label className="block text-[10px] font-mono text-slate-400 mb-1">
+                          LEAGUE NAME
+                        </label>
+                        <input
+                          type="text"
+                          value={editLeagueName}
+                          onChange={(e) => setEditLeagueName(e.target.value)}
+                          className="w-full min-h-[38px] bg-[#090A0F] border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-white"
+                        />
+                      </div>
+                      <div className="sm:col-span-4">
+                        <label className="block text-[10px] font-mono text-slate-400 mb-1">
+                          FRIEND INVITE CODE
+                        </label>
+                        <input
+                          type="text"
+                          value={editInviteCode}
+                          onChange={(e) =>
+                            setEditInviteCode(e.target.value.toUpperCase())
+                          }
+                          className="w-full min-h-[38px] bg-[#090A0F] border border-slate-700 rounded-xl px-3 py-1.5 text-xs font-mono font-bold text-[#FFD100]"
+                        />
+                      </div>
+                      <div className="sm:col-span-3">
+                        <button
+                          onClick={() =>
+                            handleUpdateAdminSetting({
+                              leagueName: editLeagueName,
+                              inviteCode: editInviteCode,
+                            })
+                          }
+                          className="w-full min-h-[38px] px-4 py-1.5 rounded-xl bg-[#1D63FF] hover:bg-[#1552db] text-white text-xs font-bold cursor-pointer"
+                        >
+                          Save Invite Settings
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="bg-[#131722] border border-slate-800/90 rounded-2xl p-4 space-y-3">
                   <div>
                     <h1 className="font-display text-2xl font-bold tracking-wide text-white">
-                      League Invite Hub &amp; Commissioner Console
+                      {leagueState?.leagueSettings?.leagueName ||
+                        'Pit Box Fantasy League'}
                     </h1>
                     <p className="text-xs text-slate-400">
-                      Share your invite code so friends can claim a team, or manage Buschwhacker Owner Points &amp; Car Anchor rules.
+                      League Commissioner:{' '}
+                      <span className="text-white font-semibold">
+                        {primaryAdmin?.name || 'Commissioner'}
+                      </span>{' '}
+                      · Contact your Commissioner for team adjustments or scoring settings.
                     </p>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={handleCopyInvite}
-                      className="min-h-[38px] px-3 py-1.5 rounded-xl bg-[#1D2233] border border-slate-700 text-xs font-mono font-bold text-[#FFD100] flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <Copy className="w-3.5 h-3.5" />
-                      <span>
-                        {copiedInvite ? 'Copied!' : 'Invite Code: PITBOX-2026'}
-                      </span>
-                    </button>
-                    <button
-                      onClick={() => setShowJoinModal(true)}
-                      className="min-h-[38px] px-3 py-1.5 rounded-xl bg-[#FFD100] text-black text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <UserPlus className="w-3.5 h-3.5" />
-                      <span>Add / Sign Up Player</span>
-                    </button>
-                  </div>
-                </div>
 
-                {/* 3-Step Workflow Guide for Managers & Players */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 pt-1 text-xs">
-                  <div className="p-3 rounded-xl bg-[#0E111A] border border-slate-800/80">
-                    <div className="font-bold text-[#FFD100]">
-                      1. Invite &amp; Claim Teams
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 pt-1 text-xs">
+                    <div className="p-3 rounded-xl bg-[#0E111A] border border-slate-800/80">
+                      <div className="font-bold text-[#FFD100]">
+                        1. Exclusive 4-Round Draft
+                      </div>
+                      <p className="text-slate-400 mt-1 leading-relaxed">
+                        Draft 1 Cup Chase, 1 Cup Non-Chase, 1 O&apos;Reilly&apos;s, and 1 Truck driver locked league-wide, plus the 5th Mid-Season Chase bonus.
+                      </p>
                     </div>
-                    <p className="text-slate-400 mt-1 leading-relaxed">
-                      Players click <strong className="text-white">Join / Add Player</strong> with code{' '}
-                      <span className="font-mono text-white">PITBOX-2026</span> or Google Sign-In to join the league and draft their 4 exclusive season drivers.
-                    </p>
-                  </div>
-                  <div className="p-3 rounded-xl bg-[#0E111A] border border-slate-800/80">
-                    <div className="font-bold text-[#FF4D6D]">
-                      2. Blind Weekly Starters
+                    <div className="p-3 rounded-xl bg-[#0E111A] border border-slate-800/80">
+                      <div className="font-bold text-[#FF4D6D]">
+                        2. Blind Weekly Starters
+                      </div>
+                      <p className="text-slate-400 mt-1 leading-relaxed">
+                        Pick 1 starter per active series in My Lineup (5 uses/driver cap). Picks stay hidden from opponents until the Green Flag.
+                      </p>
                     </div>
-                    <p className="text-slate-400 mt-1 leading-relaxed">
-                      Every week, managers tap <strong className="text-white">SWAP</strong> in My Lineup to pick 1 Cup, 1 O&apos;Reilly&apos;s, and 1 Truck starter (5 uses/driver cap). Picks stay hidden until Green Flag.
-                    </p>
-                  </div>
-                  <div className="p-3 rounded-xl bg-[#0E111A] border border-slate-800/80">
-                    <div className="font-bold text-[#609BFF]">
-                      3. Zero Manual Scoring
-                    </div>
-                    <p className="text-slate-400 mt-1 leading-relaxed">
-                      <span className="font-mono text-white">/api/nascar-sync</span> pulls live &amp; official results from{' '}
-                      <span className="font-mono text-white">cf.nascar.com</span>, awarding full Vehicle Owner Points to Buschwhackers &amp; Car Anchors.
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              {/* League Admin Role & Commissioner Access Card */}
-              <div className="bg-[#131722] border border-slate-800/90 rounded-2xl p-4 space-y-3">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-9 h-9 rounded-xl bg-[#FFD100]/15 border border-[#FFD100]/40 flex items-center justify-center shrink-0">
-                      <Crown className="w-4 h-4 text-[#FFD100]" />
-                    </div>
-                    <div>
-                      <h2 className="font-display text-lg font-bold tracking-wide uppercase text-white">
-                        League Admin (Commissioner) Access
-                      </h2>
-                      <p className="text-xs text-slate-400">
-                        First Google Sign-In automatically claims Commissioner Seat #1 (currently{' '}
-                        <span className="text-white font-semibold">
-                          {primaryAdmin?.name || 'Seat #1'}
-                        </span>
-                        ), or any manager can unlock Commissioner powers below with passcode{' '}
-                        <span className="font-mono text-[#FFD100]">COMMISH-2026</span>.
+                    <div className="p-3 rounded-xl bg-[#0E111A] border border-slate-800/80">
+                      <div className="font-bold text-[#609BFF]">
+                        3. Zero Manual Scoring
+                      </div>
+                      <p className="text-slate-400 mt-1 leading-relaxed">
+                        Live &amp; official results from{' '}
+                        <span className="font-mono text-white">
+                          cf.nascar.com
+                        </span>{' '}
+                        award full Vehicle Owner Points to Buschwhackers &amp; Car Anchors.
                       </p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <span
-                      className={`px-2.5 py-1 rounded-lg font-mono text-[11px] font-bold ${
-                        isCurrentUserAdmin
-                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                          : 'bg-slate-800 text-slate-300'
-                      }`}
-                    >
-                      {isCurrentUserAdmin ? 'ADMIN ACTIVE' : 'MEMBER VIEW'}
-                    </span>
-                    {!isCurrentUserAdmin && primaryAdmin && (
-                      <button
-                        onClick={() => setActiveManagerId(primaryAdmin.id)}
-                        className="min-h-[36px] px-3 py-1.5 rounded-xl bg-[#FFD100] text-black text-xs font-bold cursor-pointer"
-                      >
-                        Switch to {primaryAdmin.name}
-                      </button>
-                    )}
-                  </div>
                 </div>
-
-                {!isCurrentUserAdmin && (
-                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-2 border-t border-slate-800/80">
-                    <input
-                      type="text"
-                      value={adminPasscode}
-                      onChange={(e) => setAdminPasscode(e.target.value)}
-                      placeholder="Enter Commissioner Passcode (e.g. COMMISH-2026)"
-                      className="flex-1 min-h-[38px] bg-[#090A0F] border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-white"
-                    />
-                    <button
-                      onClick={() =>
-                        handleAdminTeamAction(
-                          {
-                            action: 'claim_admin',
-                            targetUserId: activeManagerId,
-                            passcode: adminPasscode,
-                          },
-                          `${activeUserRow?.name || 'Team'} promoted to League Admin!`
-                        )
-                      }
-                      className="min-h-[38px] px-4 py-1.5 rounded-xl bg-[#1D63FF] hover:bg-[#1552db] text-white text-xs font-bold cursor-pointer shrink-0"
-                    >
-                      Claim Admin Role
-                    </button>
-                  </div>
-                )}
-              </div>
+              )}
 
               {/* Commissioner Full Team Control Center */}
               {isCurrentUserAdmin && (() => {
@@ -3034,10 +3430,12 @@ export default function App() {
                 );
               })()}
 
-              {/* Commissioner Rules Toggles */}
+              {/* Commissioner Rules Toggles (Interactive only for Admin) */}
               <div className="bg-[#131722] border border-slate-800/90 rounded-2xl p-4 space-y-3">
                 <h2 className="font-display text-lg font-bold tracking-wide uppercase text-white">
-                  Commissioner Scoring &amp; League Rules
+                  {isCurrentUserAdmin
+                    ? 'Commissioner Scoring & League Rules'
+                    : 'League Scoring Rules'}
                 </h2>
 
                 <div className="divide-y divide-slate-800/80 text-xs">
@@ -3050,20 +3448,32 @@ export default function App() {
                         Awards substitute driver&apos;s Owner Points in the anchored car (e.g. #88) if your Season Driver is injured/DNS.
                       </div>
                     </div>
-                    <button
-                      onClick={() =>
-                        handleUpdateAdminSetting({
-                          useCarAnchorFallback: !useCarAnchorFallback,
-                        })
-                      }
-                      className={`min-h-[36px] px-3 py-1.5 rounded-lg font-bold cursor-pointer shrink-0 ${
-                        useCarAnchorFallback
-                          ? 'bg-emerald-500 text-black'
-                          : 'bg-slate-800 text-slate-300'
-                      }`}
-                    >
-                      {useCarAnchorFallback ? 'Enabled' : 'Disabled'}
-                    </button>
+                    {isCurrentUserAdmin ? (
+                      <button
+                        onClick={() =>
+                          handleUpdateAdminSetting({
+                            useCarAnchorFallback: !useCarAnchorFallback,
+                          })
+                        }
+                        className={`min-h-[36px] px-3 py-1.5 rounded-lg font-bold cursor-pointer shrink-0 ${
+                          useCarAnchorFallback
+                            ? 'bg-emerald-500 text-black'
+                            : 'bg-slate-800 text-slate-300'
+                        }`}
+                      >
+                        {useCarAnchorFallback ? 'Enabled' : 'Disabled'}
+                      </button>
+                    ) : (
+                      <span
+                        className={`px-3 py-1.5 rounded-lg font-bold shrink-0 ${
+                          useCarAnchorFallback
+                            ? 'bg-emerald-500/20 text-emerald-300'
+                            : 'bg-slate-800 text-slate-400'
+                        }`}
+                      >
+                        {useCarAnchorFallback ? 'Enabled' : 'Disabled'}
+                      </span>
+                    )}
                   </div>
 
                   <div className="py-2.5 flex items-center justify-between gap-3">
@@ -3075,16 +3485,22 @@ export default function App() {
                         Choose 55 pts or 40 pts for 1st place when calculating Buschwhacker Owner Points.
                       </div>
                     </div>
-                    <button
-                      onClick={() =>
-                        handleUpdateAdminSetting({
-                          firstPlacePoints: firstPlacePoints === 55 ? 40 : 55,
-                        })
-                      }
-                      className="min-h-[36px] px-3 py-1.5 rounded-lg bg-[#1D2233] border border-slate-700 font-mono font-bold text-[#FFD100] cursor-pointer shrink-0"
-                    >
-                      {firstPlacePoints} PTS (1st)
-                    </button>
+                    {isCurrentUserAdmin ? (
+                      <button
+                        onClick={() =>
+                          handleUpdateAdminSetting({
+                            firstPlacePoints: firstPlacePoints === 55 ? 40 : 55,
+                          })
+                        }
+                        className="min-h-[36px] px-3 py-1.5 rounded-lg bg-[#1D2233] border border-slate-700 font-mono font-bold text-[#FFD100] cursor-pointer shrink-0"
+                      >
+                        {firstPlacePoints} PTS (1st)
+                      </button>
+                    ) : (
+                      <span className="px-3 py-1.5 rounded-lg bg-[#1D2233] border border-slate-700 font-mono font-bold text-[#FFD100] shrink-0">
+                        {firstPlacePoints} PTS (1st)
+                      </span>
+                    )}
                   </div>
 
                   <div className="py-2.5 flex items-center justify-between gap-3">
@@ -3096,21 +3512,60 @@ export default function App() {
                         Unlocks for the final 10 Cup Chase races (duplicates allowed across league members).
                       </div>
                     </div>
-                    <button
-                      onClick={() =>
-                        handleUpdateAdminSetting({
-                          chaseActive: !midSeasonChaseActive,
-                        })
-                      }
-                      className={`min-h-[36px] px-3 py-1.5 rounded-lg font-bold cursor-pointer shrink-0 ${
-                        midSeasonChaseActive
-                          ? 'bg-[#FFD100] text-black'
-                          : 'bg-slate-800 text-slate-300'
-                      }`}
-                    >
-                      {midSeasonChaseActive ? 'Unlocked' : 'Locked'}
-                    </button>
+                    {isCurrentUserAdmin ? (
+                      <button
+                        onClick={() =>
+                          handleUpdateAdminSetting({
+                            chaseActive: !midSeasonChaseActive,
+                          })
+                        }
+                        className={`min-h-[36px] px-3 py-1.5 rounded-lg font-bold cursor-pointer shrink-0 ${
+                          midSeasonChaseActive
+                            ? 'bg-[#FFD100] text-black'
+                            : 'bg-slate-800 text-slate-300'
+                        }`}
+                      >
+                        {midSeasonChaseActive ? 'Unlocked' : 'Locked'}
+                      </button>
+                    ) : (
+                      <span
+                        className={`px-3 py-1.5 rounded-lg font-bold shrink-0 ${
+                          midSeasonChaseActive
+                            ? 'bg-[#FFD100]/20 text-[#FFD100]'
+                            : 'bg-slate-800 text-slate-400'
+                        }`}
+                      >
+                        {midSeasonChaseActive ? 'Unlocked' : 'Locked'}
+                      </span>
+                    )}
                   </div>
+
+                  {isCurrentUserAdmin && (
+                    <div className="py-2.5 flex items-center justify-between gap-3">
+                      <div>
+                        <div className="font-bold text-white">
+                          Car #88 Injury / Sub Telemetry Test
+                        </div>
+                        <div className="text-slate-400">
+                          Simulates substitute driver Owner Points in Car #88 when Connor Zilisch is DNS.
+                        </div>
+                      </div>
+                      <button
+                        onClick={() =>
+                          handleUpdateAdminSetting({
+                            simulateZilischInjury: !simulateZilischInjury,
+                          })
+                        }
+                        className={`min-h-[36px] px-3 py-1.5 rounded-lg font-bold cursor-pointer shrink-0 ${
+                          simulateZilischInjury
+                            ? 'bg-[#E4002B] text-white'
+                            : 'bg-slate-800 text-slate-300'
+                        }`}
+                      >
+                        {simulateZilischInjury ? 'Sub Active' : 'Healthy'}
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -3370,9 +3825,9 @@ export default function App() {
         )}
 
         {/* ==========================================
-            JOIN LEAGUE / SIGN UP MODAL (Sleeper/ESPN Onboarding)
+            COMMISSIONER MODAL: ADD LEAGUE MEMBER MANUALLY
         ========================================== */}
-        {showJoinModal && (
+        {showJoinModal && isCurrentUserAdmin && (
           <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4">
             <div className="w-full max-w-md bg-[#131722] border border-slate-700 rounded-2xl overflow-hidden shadow-2xl">
               <div className="h-1.5 w-full flex">
@@ -3385,10 +3840,10 @@ export default function App() {
                 <div className="flex items-start justify-between">
                   <div>
                     <h3 className="font-display text-2xl font-bold tracking-wide text-white">
-                      Join Pit Box Fantasy League
+                      Add League Member
                     </h3>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      Sign up with an Invite Code to create your team and auto-draft available season drivers, or sign in with Google.
+                      Create an account with login credentials for a league member directly.
                     </p>
                   </div>
                   <button
@@ -3399,7 +3854,7 @@ export default function App() {
                   </button>
                 </div>
 
-                <form onSubmit={handleJoinLeagueSubmit} className="space-y-3">
+                <form onSubmit={handleAdminCreateMemberSubmit} className="space-y-3">
                   <div>
                     <label className="text-xs font-semibold text-slate-300 block mb-1">
                       Manager or Team Name
@@ -3407,6 +3862,7 @@ export default function App() {
                     <input
                       type="text"
                       required
+                      minLength={2}
                       placeholder="e.g., Dale Jr. Motorsports"
                       value={newTeamName}
                       onChange={(e) => setNewTeamName(e.target.value)}
@@ -3414,30 +3870,33 @@ export default function App() {
                     />
                   </div>
 
-                  <div className="grid grid-cols-2 gap-2.5">
-                    <div>
-                      <label className="text-xs font-semibold text-slate-300 block mb-1">
-                        League Invite Code
-                      </label>
-                      <input
-                        type="text"
-                        value={inviteCodeInput}
-                        onChange={(e) => setInviteCodeInput(e.target.value)}
-                        className="w-full min-h-[42px] bg-[#090A0F] border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono font-bold text-[#FFD100]"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-xs font-semibold text-slate-300 block mb-1">
-                        Email (Optional)
-                      </label>
-                      <input
-                        type="email"
-                        placeholder="you@example.com"
-                        value={newTeamEmail}
-                        onChange={(e) => setNewTeamEmail(e.target.value)}
-                        className="w-full min-h-[42px] bg-[#090A0F] border border-slate-700 rounded-xl px-3 py-2 text-xs text-white"
-                      />
-                    </div>
+                  <div>
+                    <label className="text-xs font-semibold text-slate-300 block mb-1">
+                      Member Email
+                    </label>
+                    <input
+                      type="email"
+                      required
+                      placeholder="member@example.com"
+                      value={newTeamEmail}
+                      onChange={(e) => setNewTeamEmail(e.target.value)}
+                      className="w-full min-h-[42px] bg-[#090A0F] border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-[#FFD100]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-semibold text-slate-300 block mb-1">
+                      Initial Password (min 6 chars)
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      minLength={6}
+                      placeholder="Set a temporary password"
+                      value={newTeamPassword}
+                      onChange={(e) => setNewTeamPassword(e.target.value)}
+                      className="w-full min-h-[42px] bg-[#090A0F] border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-[#FFD100]"
+                    />
                   </div>
 
                   <button
@@ -3445,28 +3904,9 @@ export default function App() {
                     disabled={isJoining}
                     className="w-full min-h-[44px] rounded-xl bg-[#FFD100] hover:bg-[#ffe033] text-black font-bold text-xs uppercase tracking-wider cursor-pointer transition-colors"
                   >
-                    {isJoining
-                      ? 'Creating Team & Roster...'
-                      : 'Create Team & Enter League'}
+                    {isJoining ? 'Creating Account...' : 'Create Member Account'}
                   </button>
                 </form>
-
-                <div className="relative flex py-1 items-center">
-                  <div className="flex-grow border-t border-slate-800" />
-                  <span className="shrink mx-3 text-[11px] text-slate-500">
-                    OR LINK GOOGLE ACCOUNT
-                  </span>
-                  <div className="flex-grow border-t border-slate-800" />
-                </div>
-
-                <button
-                  type="button"
-                  onClick={handleGoogleSignIn}
-                  className="w-full min-h-[42px] rounded-xl bg-[#1D2233] hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-white flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  <LogIn className="w-4 h-4 text-[#FFD100]" />
-                  <span>Continue with Google Sign-In</span>
-                </button>
               </div>
             </div>
           </div>

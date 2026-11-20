@@ -1,11 +1,14 @@
-import express from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import * as dotenv from 'dotenv';
-import { requireAuth, AuthRequest } from './src/middleware/auth.ts';
 import {
-  getOrCreateUser,
-  joinLeagueMember,
+  ensureReferenceDataSeeded,
+  getAuthBootstrapInfo,
+  getUserById,
+  registerAccount,
+  loginAccount,
+  adminCreateMember,
   getFullLeagueState,
   saveWeeklyPick,
   updateSeasonRosterSlot,
@@ -16,8 +19,14 @@ import {
   adminOverrideWeeklyPick,
   adminUpdateSeasonSlot,
   resetExclusiveDraft,
-  claimAdminWithPasscode,
 } from './src/db/repository.ts';
+import {
+  parseCookies,
+  verifySessionToken,
+  setSessionCookie,
+  clearSessionCookie,
+  SESSION_COOKIE_NAME,
+} from './src/lib/session.ts';
 import {
   processRaceResultsWithOwnerFallback,
   NascarFeedResult,
@@ -27,6 +36,83 @@ import {
 dotenv.config();
 
 const NASCAR_CDN_BASE = 'https://cf.nascar.com';
+
+export interface SessionUser {
+  id: string;
+  uid: string;
+  email: string;
+  name: string;
+  avatar: string;
+  role: string;
+  lastYearRank: number;
+  cumulativePriorPoints: number;
+}
+
+interface SessionRequest extends Request {
+  sessionUser?: SessionUser;
+}
+
+async function resolveSessionUser(req: Request): Promise<SessionUser | null> {
+  const cookies = parseCookies(req.headers.cookie);
+  const rawToken = cookies[SESSION_COOKIE_NAME];
+  if (!rawToken) return null;
+
+  const verified = verifySessionToken(rawToken);
+  if (!verified) return null;
+
+  const user = await getUserById(verified.uid);
+  if (!user) return null;
+  return user;
+}
+
+const requireSession = async (
+  req: SessionRequest,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const user = await resolveSessionUser(req);
+    if (!user) {
+      return res
+        .status(401)
+        .json({ ok: false, error: 'Authentication required' });
+    }
+    req.sessionUser = user;
+    next();
+  } catch (error) {
+    console.error('Session lookup error:', error);
+    return res
+      .status(401)
+      .json({ ok: false, error: 'Authentication required' });
+  }
+};
+
+const requireAdminSession = async (
+  req: SessionRequest,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const user = await resolveSessionUser(req);
+    if (!user) {
+      return res
+        .status(401)
+        .json({ ok: false, error: 'Authentication required' });
+    }
+    if (user.role !== 'admin') {
+      return res
+        .status(403)
+        .json({ ok: false, error: 'Commissioner permission required' });
+    }
+    req.sessionUser = user;
+    next();
+  } catch (error) {
+    console.error('Admin session check error:', error);
+    return res
+      .status(401)
+      .json({ ok: false, error: 'Authentication required' });
+  }
+};
 
 function getWeekendGroupId(dateStr: string): string {
   const d = new Date(dateStr);
@@ -46,222 +132,316 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
+  app.set('trust proxy', 1);
   app.use(express.json());
 
-  // 1. Fetch full PostgreSQL-backed league state
-  app.get('/api/league-state', async (_req, res) => {
+  // Seed canonical NASCAR reference tables on boot without fake users or picks
+  ensureReferenceDataSeeded().catch((err) =>
+    console.error('Initial reference seed check failed:', err)
+  );
+
+  // ==========================================
+  // PUBLIC AUTHENTICATION ROUTES
+  // ==========================================
+
+  app.get('/api/auth/me', async (req, res) => {
     try {
-      const state = await getFullLeagueState();
-      res.json({ ok: true, state });
+      const user = await resolveSessionUser(req);
+      if (user) {
+        return res.json({ ok: true, authenticated: true, user });
+      }
+      const bootstrap = await getAuthBootstrapInfo();
+      return res.json({
+        ok: true,
+        authenticated: false,
+        ...bootstrap,
+      });
     } catch (error: any) {
-      console.error('Failed to fetch league state:', error);
-      res.status(500).json({
+      console.error('Error in /api/auth/me:', error);
+      return res.status(500).json({
         ok: false,
-        error: error.message || 'Failed to load league state',
+        error: error.message || 'Failed to check session status',
       });
     }
   });
 
-  // 2. Authenticate & link Firebase user to PostgreSQL `users` table
-  app.post('/api/auth/sync', requireAuth, async (req: AuthRequest, res) => {
+  app.post('/api/auth/register', async (req, res) => {
     try {
-      const decoded = req.user!;
-      const userRecord = await getOrCreateUser(
-        decoded.uid,
-        decoded.email || 'driver@pitboxfantasy.com',
-        decoded.name
-      );
-      const state = await getFullLeagueState();
-      res.json({ ok: true, user: userRecord, state });
-    } catch (error: any) {
-      console.error('Failed to sync authenticated user:', error);
-      res.status(500).json({
-        ok: false,
-        error: error.message || 'Failed to synchronize user profile',
-      });
-    }
-  });
-
-  // 2b. Sign Up / Join League via Invite Code + Team Name
-  app.post('/api/league/join', async (req, res) => {
-    try {
-      const { name, email, avatar, inviteCode } = req.body || {};
-      const newMember = await joinLeagueMember({
+      const { name, email, password, inviteCode, leagueName } = req.body || {};
+      const user = await registerAccount({
         name: String(name || ''),
-        email: email ? String(email) : undefined,
-        avatar: avatar ? String(avatar) : undefined,
+        email: String(email || ''),
+        password: String(password || ''),
         inviteCode: inviteCode ? String(inviteCode) : undefined,
+        leagueName: leagueName ? String(leagueName) : undefined,
       });
-      const state = await getFullLeagueState();
-      res.json({ ok: true, user: newMember, state });
+      setSessionCookie(res, user.id);
+      const state = await getFullLeagueState(user);
+      return res.json({ ok: true, user, state });
     } catch (error: any) {
-      res.status(400).json({
+      return res.status(400).json({
         ok: false,
-        error: error.message || 'Failed to join league',
+        error: error.message || 'Failed to create account',
       });
     }
   });
 
-  // 3. Submit or update a Weekly Pick in PostgreSQL
-  app.post('/api/weekly-pick', async (req, res) => {
+  app.post('/api/auth/login', async (req, res) => {
     try {
-      const { userId, raceId, seriesId, driverId } = req.body;
-      if (!userId || !raceId || !seriesId || !driverId) {
-        return res.status(400).json({ ok: false, error: 'Missing pick fields' });
+      const { email, password } = req.body || {};
+      const user = await loginAccount({
+        email: String(email || ''),
+        password: String(password || ''),
+      });
+      setSessionCookie(res, user.id);
+      const state = await getFullLeagueState(user);
+      return res.json({ ok: true, user, state });
+    } catch (error: any) {
+      return res.status(401).json({
+        ok: false,
+        error: error.message || 'Invalid email or password',
+      });
+    }
+  });
+
+  app.post('/api/auth/logout', (_req, res) => {
+    clearSessionCookie(res);
+    return res.json({ ok: true });
+  });
+
+  // ==========================================
+  // PROTECTED LEAGUE ROUTES (Session Required)
+  // ==========================================
+
+  // 1. Fetch PostgreSQL-backed league state (blind picks masked for non-admins)
+  app.get(
+    '/api/league-state',
+    requireSession,
+    async (req: SessionRequest, res) => {
+      try {
+        const state = await getFullLeagueState(req.sessionUser!);
+        res.json({ ok: true, state });
+      } catch (error: any) {
+        console.error('Failed to fetch league state:', error);
+        res.status(500).json({
+          ok: false,
+          error: error.message || 'Failed to load league state',
+        });
       }
-      await saveWeeklyPick({
-        userId: String(userId),
-        raceId: String(raceId),
-        seriesId: Number(seriesId),
-        driverId: String(driverId),
-      });
-      const state = await getFullLeagueState();
-      res.json({ ok: true, state });
-    } catch (error: any) {
-      res.status(400).json({
-        ok: false,
-        error: error.message || 'Failed to save weekly pick',
-      });
     }
-  });
+  );
 
-  // 4. Update Season-Long Roster Slot or Car Anchor Fallback in PostgreSQL
-  app.post('/api/season-roster', async (req, res) => {
-    try {
-      const { userId, seriesId, slotType, driverId, fallbackCarNumber } =
-        req.body;
-      if (!userId || !seriesId || !slotType || !driverId || !fallbackCarNumber) {
-        return res
-          .status(400)
-          .json({ ok: false, error: 'Missing season roster fields' });
+  // 2. Submit or update own Weekly Pick in PostgreSQL
+  app.post(
+    '/api/weekly-pick',
+    requireSession,
+    async (req: SessionRequest, res) => {
+      try {
+        const { raceId, seriesId, driverId } = req.body || {};
+        if (!raceId || !seriesId || !driverId) {
+          return res
+            .status(400)
+            .json({ ok: false, error: 'Missing pick fields' });
+        }
+        await saveWeeklyPick({
+          userId: req.sessionUser!.id,
+          raceId: String(raceId),
+          seriesId: Number(seriesId),
+          driverId: String(driverId),
+        });
+        const state = await getFullLeagueState(req.sessionUser!);
+        res.json({ ok: true, state });
+      } catch (error: any) {
+        res.status(400).json({
+          ok: false,
+          error: error.message || 'Failed to save weekly pick',
+        });
       }
-      await updateSeasonRosterSlot({
-        userId: String(userId),
-        seriesId: Number(seriesId),
-        slotType: String(slotType),
-        driverId: String(driverId),
-        fallbackCarNumber: String(fallbackCarNumber),
-      });
-      const state = await getFullLeagueState();
-      res.json({ ok: true, state });
-    } catch (error: any) {
-      res.status(400).json({
-        ok: false,
-        error: error.message || 'Failed to update season roster',
-      });
     }
-  });
+  );
 
-  // 5. Update Commissioner Admin Settings & Telemetry Simulation Toggles in PostgreSQL
-  app.post('/api/admin/settings', async (req, res) => {
-    try {
-      const state = await updateLeagueAdminSettings(req.body || {});
-      res.json({ ok: true, state });
-    } catch (error: any) {
-      console.error('Failed to update commissioner settings:', error);
-      res.status(500).json({
-        ok: false,
-        error: error.message || 'Failed to update commissioner settings',
-      });
-    }
-  });
-
-  // 5b. Commissioner Team Management (Adjust any team's profile, role, points, weekly pick, or season roster/anchor)
-  app.post('/api/admin/team', async (req, res) => {
-    try {
-      const body = req.body || {};
-      const { action, adminUserId, targetUserId } = body;
-
-      if (action === 'claim_admin') {
-        await claimAdminWithPasscode({
-          targetUserId: String(targetUserId || ''),
-          passcode: String(body.passcode || ''),
-        });
-      } else if (action === 'update_profile') {
-        await adminUpdateTeam({
-          adminUserId: String(adminUserId || ''),
-          targetUserId: String(targetUserId || ''),
-          name: body.name,
-          role: body.role,
-          lastYearRank:
-            body.lastYearRank !== undefined
-              ? Number(body.lastYearRank)
-              : undefined,
-          cumulativePriorPoints:
-            body.cumulativePriorPoints !== undefined
-              ? Number(body.cumulativePriorPoints)
-              : undefined,
-        });
-      } else if (action === 'delete_team') {
-        await adminDeleteTeam({
-          adminUserId: String(adminUserId || ''),
-          targetUserId: String(targetUserId || ''),
-        });
-      } else if (action === 'override_weekly_pick') {
-        await adminOverrideWeeklyPick({
-          adminUserId: String(adminUserId || ''),
-          targetUserId: String(targetUserId || ''),
-          raceId: String(body.raceId || ''),
-          seriesId: Number(body.seriesId),
-          driverId: String(body.driverId || ''),
-        });
-      } else if (action === 'override_season_slot') {
-        await adminUpdateSeasonSlot({
-          adminUserId: String(adminUserId || ''),
-          targetUserId: String(targetUserId || ''),
-          seriesId: Number(body.seriesId),
-          slotType: String(body.slotType || ''),
-          driverId: String(body.driverId || ''),
-          fallbackCarNumber: String(body.fallbackCarNumber || ''),
-          forceReassign: Boolean(body.forceReassign),
-        });
-      } else {
-        return res.status(400).json({ ok: false, error: 'Invalid admin action' });
-      }
-
-      const state = await getFullLeagueState();
-      res.json({ ok: true, state });
-    } catch (error: any) {
-      res.status(400).json({
-        ok: false,
-        error: error.message || 'Commissioner action failed',
-      });
-    }
-  });
-
-  // 5c. Interactive Initial Draft Room Actions (Reset Draft / Submit Pick)
-  app.post('/api/draft/action', async (req, res) => {
-    try {
-      const body = req.body || {};
-      const { action } = body;
-
-      if (action === 'reset_draft') {
-        await resetExclusiveDraft(String(body.adminUserId || ''));
-      } else if (action === 'submit_pick') {
+  // 3. Update own Season-Long Roster Slot or Car Anchor Fallback in PostgreSQL
+  app.post(
+    '/api/season-roster',
+    requireSession,
+    async (req: SessionRequest, res) => {
+      try {
+        const { seriesId, slotType, driverId, fallbackCarNumber } =
+          req.body || {};
+        if (!seriesId || !slotType || !driverId || !fallbackCarNumber) {
+          return res
+            .status(400)
+            .json({ ok: false, error: 'Missing season roster fields' });
+        }
         await updateSeasonRosterSlot({
-          userId: String(body.targetUserId || ''),
-          seriesId: Number(body.seriesId),
-          slotType: String(body.slotType || ''),
-          driverId: String(body.driverId || ''),
-          fallbackCarNumber: String(body.fallbackCarNumber || ''),
+          userId: req.sessionUser!.id,
+          seriesId: Number(seriesId),
+          slotType: String(slotType),
+          driverId: String(driverId),
+          fallbackCarNumber: String(fallbackCarNumber),
         });
-      } else {
-        return res.status(400).json({ ok: false, error: 'Invalid draft action' });
+        const state = await getFullLeagueState(req.sessionUser!);
+        res.json({ ok: true, state });
+      } catch (error: any) {
+        res.status(400).json({
+          ok: false,
+          error: error.message || 'Failed to update season roster',
+        });
       }
-
-      const state = await getFullLeagueState();
-      res.json({ ok: true, state });
-    } catch (error: any) {
-      res.status(400).json({
-        ok: false,
-        error: error.message || 'Draft action failed',
-      });
     }
-  });
+  );
 
-  // 6. Automated NASCAR Data Pipeline (`/api/nascar-sync`)
+  // 4. Update Commissioner Admin Settings & League Invite Config (Admin Only)
+  app.post(
+    '/api/admin/settings',
+    requireAdminSession,
+    async (req: SessionRequest, res) => {
+      try {
+        const state = await updateLeagueAdminSettings({
+          ...(req.body || {}),
+          adminUserId: req.sessionUser!.id,
+        });
+        res.json({ ok: true, state });
+      } catch (error: any) {
+        console.error('Failed to update commissioner settings:', error);
+        res.status(400).json({
+          ok: false,
+          error: error.message || 'Failed to update commissioner settings',
+        });
+      }
+    }
+  );
+
+  // 5. Commissioner Team Management (Admin Only)
+  app.post(
+    '/api/admin/team',
+    requireAdminSession,
+    async (req: SessionRequest, res) => {
+      try {
+        const body = req.body || {};
+        const { action, targetUserId } = body;
+        const adminUserId = req.sessionUser!.id;
+
+        if (action === 'create_member') {
+          await adminCreateMember({
+            adminUserId,
+            name: String(body.name || ''),
+            email: String(body.email || ''),
+            password: String(body.password || ''),
+          });
+        } else if (action === 'update_profile') {
+          await adminUpdateTeam({
+            adminUserId,
+            targetUserId: String(targetUserId || ''),
+            name: body.name,
+            role: body.role,
+            lastYearRank:
+              body.lastYearRank !== undefined
+                ? Number(body.lastYearRank)
+                : undefined,
+            cumulativePriorPoints:
+              body.cumulativePriorPoints !== undefined
+                ? Number(body.cumulativePriorPoints)
+                : undefined,
+          });
+        } else if (action === 'delete_team') {
+          await adminDeleteTeam({
+            adminUserId,
+            targetUserId: String(targetUserId || ''),
+          });
+        } else if (action === 'override_weekly_pick') {
+          await adminOverrideWeeklyPick({
+            adminUserId,
+            targetUserId: String(targetUserId || ''),
+            raceId: String(body.raceId || ''),
+            seriesId: Number(body.seriesId),
+            driverId: String(body.driverId || ''),
+          });
+        } else if (action === 'override_season_slot') {
+          await adminUpdateSeasonSlot({
+            adminUserId,
+            targetUserId: String(targetUserId || ''),
+            seriesId: Number(body.seriesId),
+            slotType: String(body.slotType || ''),
+            driverId: String(body.driverId || ''),
+            fallbackCarNumber: String(body.fallbackCarNumber || ''),
+            forceReassign: Boolean(body.forceReassign),
+          });
+        } else {
+          return res
+            .status(400)
+            .json({ ok: false, error: 'Invalid admin action' });
+        }
+
+        const state = await getFullLeagueState(req.sessionUser!);
+        res.json({ ok: true, state });
+      } catch (error: any) {
+        res.status(400).json({
+          ok: false,
+          error: error.message || 'Commissioner action failed',
+        });
+      }
+    }
+  );
+
+  // 6. Interactive Initial Draft Room Actions (Session Required; Admin Required for Reset or Other-Team Picks)
+  app.post(
+    '/api/draft/action',
+    requireSession,
+    async (req: SessionRequest, res) => {
+      try {
+        const body = req.body || {};
+        const { action } = body;
+        const sessionUser = req.sessionUser!;
+
+        if (action === 'reset_draft') {
+          if (sessionUser.role !== 'admin') {
+            return res.status(403).json({
+              ok: false,
+              error: 'Only the League Commissioner can restart the draft.',
+            });
+          }
+          await resetExclusiveDraft(sessionUser.id);
+        } else if (action === 'submit_pick') {
+          const targetId = body.targetUserId
+            ? String(body.targetUserId)
+            : sessionUser.id;
+          if (targetId !== sessionUser.id && sessionUser.role !== 'admin') {
+            return res.status(403).json({
+              ok: false,
+              error: 'You can only submit picks for your own team.',
+            });
+          }
+          await updateSeasonRosterSlot({
+            userId: targetId,
+            seriesId: Number(body.seriesId),
+            slotType: String(body.slotType || ''),
+            driverId: String(body.driverId || ''),
+            fallbackCarNumber: String(body.fallbackCarNumber || ''),
+          });
+        } else {
+          return res
+            .status(400)
+            .json({ ok: false, error: 'Invalid draft action' });
+        }
+
+        const state = await getFullLeagueState(sessionUser);
+        res.json({ ok: true, state });
+      } catch (error: any) {
+        res.status(400).json({
+          ok: false,
+          error: error.message || 'Draft action failed',
+        });
+      }
+    }
+  );
+
+  // 7. Automated NASCAR Data Pipeline (`/api/nascar-sync`)
   // Polls cf.nascar.com server-side, parses schedule & race results, calculates Buschwhacker Owner Points, and updates PostgreSQL
-  app.post('/api/nascar-sync', async (req, res) => {
+  app.post(
+    '/api/nascar-sync',
+    requireSession,
+    async (req: SessionRequest, res) => {
     try {
       const body = req.body || {};
       const year = Number(body.year) || 2025;
@@ -386,7 +566,7 @@ async function startServer() {
         firstPlacePointsConfig,
         simulateZilischInjury
       );
-      const updatedState = await getFullLeagueState();
+      const updatedState = await getFullLeagueState(req.sessionUser!);
 
       res.json({
         ok: true,
